@@ -11,11 +11,12 @@
   html,body { margin:0; height:100%; background:var(--night); color:var(--ink); font-family:"Trebuchet MS",system-ui,sans-serif; overflow:hidden; }
   video, canvas, #shade { position:fixed; inset:0; width:100%; height:100%; }
   video { object-fit:cover; }
-  #shade { background:rgba(16,21,28,.2); }
+  #shade { background:rgba(16,21,28,.12); }
   canvas { pointer-events:none; }
-  #bar { position:fixed; top:env(safe-area-inset-top,0px); left:0; right:0; z-index:5; display:flex; justify-content:space-between; align-items:center; padding:12px 14px; gap:8px; font-weight:700; text-shadow:0 2px 6px rgba(0,0,0,.6); }
+  #bar { position:fixed; top:env(safe-area-inset-top,0px); left:0; right:0; z-index:5; display:flex; justify-content:space-between; align-items:center; padding:12px 12px; gap:6px; font-weight:700; font-size:13px; text-shadow:0 2px 6px rgba(0,0,0,.7); }
+  .grp { display:flex; gap:6px; }
   button { font:inherit; font-weight:700; font-size:16px; padding:12px 24px; border:0; border-radius:14px; background:var(--teal); color:#06231f; }
-  #bar button { font-size:14px; padding:9px 14px; background:rgba(244,239,230,.9); color:var(--night); }
+  #bar button { font-size:13px; padding:9px 12px; background:rgba(244,239,230,.92); color:var(--night); }
   button:focus-visible { outline:3px solid var(--amber); outline-offset:3px; }
   #status { position:fixed; top:calc(env(safe-area-inset-top,0px) + 64px); left:50%; transform:translateX(-50%); z-index:5; padding:9px 16px; border-radius:12px; background:rgba(16,21,28,.82); font-size:15px; text-align:center; max-width:90vw; }
   #panel { position:fixed; inset:0; z-index:6; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center; background:rgba(16,21,28,.88); }
@@ -30,10 +31,10 @@
 <canvas id="gl"></canvas>
 <canvas id="ov"></canvas>
 <div id="status" hidden></div>
-<div id="bar" hidden><button id="clear">Clear</button><span id="count">Blocks 0</span><button id="recal">Re-anchor</button></div>
+<div id="bar" hidden><button id="clear">Clear</button><span id="count"></span><span class="grp"><button id="more">More</button><button id="recal">Re-anchor</button></span></div>
 <div id="panel">
   <h1>Table Fort</h1>
-  <p>Prop your phone up so the back camera sees your table. Rest your open hand flat on the table where you want to build, and hold still for a second. The block table then locks onto your real table. Pinch a block from the tray, drop it on the grid, and pinch a top block to move it.</p>
+  <p>Prop your phone up so the back camera sees your table. Rest your open hand flat on the table and hold still for a second to set the table height. Then materials appear around you: turn your phone to find them, pinch to grab, carry them to one spot and let go. Pieces that land near each other snap together and build.</p>
   <button id="start">Start camera</button>
   <div id="msg"></div>
 </div>
@@ -44,8 +45,8 @@
 const $ = id => document.getElementById(id);
 const video = $('cam'), gl = $('gl'), ov = $('ov'), octx = ov.getContext('2d');
 let W = innerWidth, H = innerHeight, hands = [], sending = false, last = 0;
-let anchored = false, tableY = 0, holdT = 0, holdRef = null, progress = 0;
-const N = 8, UNIT = 0.04; // one grid cell = 4 cm on your real table
+let anchored = false, scattered = false, tableY = 0, holdT = 0, holdRef = null, progress = 0;
+const UNIT = 0.05; // one block = 5 cm on your real table
 const FOCAL = parseFloat(new URLSearchParams(location.search).get('f')) || .78;
 const D2R = Math.PI/180;
 
@@ -54,7 +55,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
 renderer.setClearColor(0x000000, 0);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, 1, .05, 300);
-scene.add(new THREE.AmbientLight(0xffffff, .75));
+scene.add(new THREE.AmbientLight(0xffffff, .8));
 const sun = new THREE.DirectionalLight(0xffffff, .8); sun.position.set(3, 8, 5); scene.add(sun);
 
 function resize(){
@@ -72,7 +73,7 @@ function refreshCam(){
 }
 addEventListener('resize', resize); resize();
 
-// phone tilt (gyro): tells us which way is down, so the table plane is level and the view follows the phone
+// phone tilt (gyro): which way is down, and where the phone is pointing
 let ori = { a: 0, b: 0, g: 0, ok: false };
 addEventListener('deviceorientation', e => { if (e.beta == null) return; ori = { a: e.alpha || 0, b: e.beta, g: e.gamma || 0, ok: true }; });
 const zee = new THREE.Vector3(0, 0, 1), eul = new THREE.Euler(), q0 = new THREE.Quaternion(), q1 = new THREE.Quaternion(-Math.sqrt(.5), 0, 0, Math.sqrt(.5)), tq = new THREE.Quaternion();
@@ -86,49 +87,77 @@ function updateOrientation(){
   camera.updateMatrixWorld(true);
 }
 
-// board: grid, tray and blocks, placed on your real table once anchored
+// board = build area frame, set on your real table when you anchor. Nothing of it is drawn.
 const board = new THREE.Group(); board.visible = false; scene.add(board);
-const table = new THREE.Mesh(new THREE.PlaneGeometry(N, N), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: .14 }));
-table.rotation.x = -Math.PI/2; board.add(table);
-const grid = new THREE.GridHelper(N, N, 0xffffff, 0xffffff); grid.material.transparent = true; grid.material.opacity = .5; board.add(grid);
-const trayBase = new THREE.Mesh(new THREE.PlaneGeometry(N, 1.8), new THREE.MeshBasicMaterial({ color: 0x10151c, transparent: true, opacity: .35 }));
-trayBase.rotation.x = -Math.PI/2; trayBase.position.set(0, .01, 5.4); board.add(trayBase);
 
 const TYPES = [ { color: 0xc98b4e }, { color: 0x9aa3ad }, { color: 0xd9503f }, { color: 0x8fd8ff, opacity: .65 } ];
 const boxGeo = new THREE.BoxGeometry(.94, .94, .94), edgeGeo = new THREE.EdgesGeometry(boxGeo), edgeMat = new THREE.LineBasicMaterial({ color: 0x10151c });
+const shGeo = new THREE.CircleGeometry(.68, 20), shMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .3, depthWrite: false });
 function makeBlock(t){
   const m = new THREE.Mesh(boxGeo, new THREE.MeshLambertMaterial({ color: t.color, transparent: !!t.opacity, opacity: t.opacity || 1 }));
-  m.add(new THREE.LineSegments(edgeGeo, edgeMat)); m.userData = { type: t }; return m;
+  m.add(new THREE.LineSegments(edgeGeo, edgeMat));
+  const sh = new THREE.Mesh(shGeo, shMat); sh.rotation.x = -Math.PI/2; sh.position.y = -.475; sh.visible = false; m.add(sh);
+  m.userData = { type: t, sh }; return m;
 }
-const tray = TYPES.map((t, k) => { const m = makeBlock(t); m.position.set(-3 + k*2, .5, 5.4); board.add(m); return m; });
-const stacks = Array.from({ length: N }, () => Array.from({ length: N }, () => []));
+const loose = [];            // materials floating around, waiting to be found
+const stacks = new Map();    // "i,j" -> blocks stacked on that cell
+const stackAt = (i, j) => { const k = i + ',' + j; let s = stacks.get(k); if (!s){ s = []; stacks.set(k, s); } return s; };
+const lenAt = (i, j) => (stacks.get(i + ',' + j) || []).length;
 const ghost = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)), new THREE.LineBasicMaterial({ color: 0xffb83d }));
 ghost.visible = false; board.add(ghost);
+const dropLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineBasicMaterial({ color: 0xffb83d }));
+dropLine.visible = false; dropLine.frustumCulled = false; board.add(dropLine);
+function updateDropLine(a, b){ const pos = dropLine.geometry.attributes.position; pos.setXYZ(0, a.x, a.y, a.z); pos.setXYZ(1, b.x, b.y, b.z); pos.needsUpdate = true; dropLine.visible = true; }
 
-function count(){ let n = 0; stacks.forEach(r => r.forEach(s => n += s.length)); $('count').textContent = 'Blocks ' + n; }
-function cellOf(x, z){ const i = Math.floor(x + 4), j = Math.floor(z + 4); return (i >= 0 && i < N && j >= 0 && j < N) ? [i, j] : null; }
+function count(){ let n = 0; stacks.forEach(s => n += s.length); $('count').textContent = 'Placed ' + n + ' | Left ' + loose.length; }
 function setStatus(t){ const e = $('status'); e.textContent = t; e.hidden = !t; }
+const cellOf = (x, z) => [Math.round(x), Math.round(z)];
+// auto-build: a dropped piece snaps onto, or beside, the nearest piece already placed
+function snapCell(x, z){
+  let best = null, bd = 2.4;
+  for (const [k, st] of stacks){
+    if (!st.length) continue;
+    const [a, b] = k.split(',').map(Number);
+    for (let da = -1; da <= 1; da++) for (let db = -1; db <= 1; db++){
+      const i = a + da, j = b + db; if (lenAt(i, j) >= 8) continue;
+      const d = Math.hypot(i - x, j - z); if (d < bd){ bd = d; best = [i, j]; }
+    }
+  }
+  return best || cellOf(x, z);
+}
+// scatter materials in a wide arc around you, at table height, so you have to look around to find them
+function scatter(n){
+  const P = board.position, dP = Math.max(6, Math.hypot(P.x, P.z)), base = Math.atan2(P.x, P.z), v = new THREE.Vector3();
+  for (let k = 0; k < n; k++){
+    const a = base + (Math.random() - .5)*2.7, r = dP*(.7 + Math.random()*1.0);
+    v.set(Math.sin(a)*r, tableY + 1.2 + Math.random()*1.6, Math.cos(a)*r);
+    const m = makeBlock(TYPES[(Math.random()*TYPES.length)|0]);
+    m.position.copy(board.worldToLocal(v.clone())); m.userData.y0 = m.position.y; m.userData.ph = Math.random()*6;
+    board.add(m); loose.push(m);
+  }
+  count();
+}
 
 // screen helpers
 const tmp = new THREE.Vector3(), raycaster = new THREE.Raycaster(), floor = new THREE.Plane(new THREE.Vector3(0,1,0), 0), hit = new THREE.Vector3();
 function toScreen(o){ o.getWorldPosition(tmp); tmp.project(camera); return { x: (tmp.x+1)/2*W, y: (1-tmp.y)/2*H }; }
-function rayAt(x, y){ floor.constant = -tableY; raycaster.setFromCamera({ x: x/W*2-1, y: -(y/H)*2+1 }, camera); return raycaster.ray.intersectPlane(floor, hit) ? hit : null; }
 function map(l){
   const vw = video.videoWidth || 640, vh = video.videoHeight || 480, s = Math.max(W/vw, H/vh), ox = (W - vw*s)/2, oy = (H - vh*s)/2;
   return { x: ox + l.x*vw*s, y: oy + l.y*vh*s };
 }
 
 // hands
-const holds = [ { obj:null, pinched:false, has:false, hx:0, hz:0 }, { obj:null, pinched:false, has:false, hx:0, hz:0 } ];
+const holds = [0, 1].map(() => ({ obj: null, pinched: false, init: false, px: 0, py: 0, ratio: 1, on: 0, off: 0, lostT: 0, hover: null, hoverObj: null, cell: null }));
+const d3w = (L, lm, a, b) => L ? Math.hypot(L[a].x-L[b].x, L[a].y-L[b].y, L[a].z-L[b].z) : Math.hypot(lm[a].x-lm[b].x, lm[a].y-lm[b].y);
 function updateHands(res){
   const wls = res.multiHandWorldLandmarks || [];
   hands = (res.multiHandLandmarks || []).slice(0, 2).map((lm, i) => {
-    const p = lm.map(map), size = Math.hypot(lm[0].x-lm[9].x, lm[0].y-lm[9].y) || .1;
-    return { p, raw: lm, wl: wls[i], ratio: Math.hypot(lm[4].x-lm[8].x, lm[4].y-lm[8].y)/size, cx: (p[4].x+p[8].x)/2, cy: (p[4].y+p[8].y)/2 };
+    const p = lm.map(map), L = wls[i];
+    return { p, raw: lm, wl: L, rawRatio: d3w(L, lm, 4, 8)/(d3w(L, lm, 0, 9) || .1), ratio: 1, cx: (p[4].x+p[8].x)/2, cy: (p[4].y+p[8].y)/2 };
   });
 }
 
-// anchoring: an open hand resting on the table gives us a point on the table (distance comes from the size of your palm)
+// anchoring: an open hand resting on the table gives a point on the table (distance comes from palm size)
 function palmPoint(h){
   const lm = h.raw, wl = h.wl, vw = video.videoWidth || 640, vh = video.videoHeight || 480, f = FOCAL*vw;
   const pairs = [[0,9,.10],[5,17,.075],[0,17,.09]], zs = [];
@@ -144,15 +173,16 @@ function palmPoint(h){
 }
 function placeBoard(P){
   board.position.copy(P); board.rotation.y = Math.atan2(-P.x, -P.z); tableY = P.y;
-  board.visible = true; board.updateMatrixWorld(true); anchored = true; progress = 0; setStatus('');
+  board.visible = true; board.updateMatrixWorld(true); anchored = true; progress = 0;
+  if (!scattered){ scattered = true; scatter(12); }
+  setStatus('Turn your phone to find materials, then pinch to grab');
 }
 function calibrate(dt){
   if (anchored) return;
   const h = hands[0];
   if (!h){ holdT = 0; holdRef = null; progress = 0; return; }
   const lm = h.raw, L = h.wl;
-  const d3 = (a, b) => L ? Math.hypot(L[a].x-L[b].x, L[a].y-L[b].y, L[a].z-L[b].z) : Math.hypot(lm[a].x-lm[b].x, lm[a].y-lm[b].y);
-  const palm = d3(0, 9), open = d3(0, 8) > 1.5*palm && d3(0, 12) > 1.5*palm;
+  const palm = d3w(L, lm, 0, 9), open = d3w(L, lm, 0, 8) > 1.5*palm && d3w(L, lm, 0, 12) > 1.5*palm;
   const c = { x: h.p[9].x, y: h.p[9].y };
   if (!open || (holdRef && Math.hypot(c.x-holdRef.x, c.y-holdRef.y) > 22)){ holdRef = c; holdT = 0; progress = 0; return; }
   if (!holdRef) holdRef = c;
@@ -160,69 +190,142 @@ function calibrate(dt){
   if (holdT >= 1.2){ const P = palmPoint(h); if (P) placeBoard(P); holdT = 0; }
 }
 
-function pickAt(x, y){
-  let best = null, bd = 80, from = '';
-  tray.forEach(t => { const p = toScreen(t), d = Math.hypot(p.x-x, p.y-y); if (d < bd){ bd = d; best = t; from = 'tray'; } });
-  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++){
-    const st = stacks[i][j]; if (!st.length) continue;
-    const t = st[st.length-1], p = toScreen(t), d = Math.hypot(p.x-x, p.y-y);
-    if (d < bd){ bd = d; best = t; from = 'stack'; }
+// picking: the piece under your open hand glows, and pinching grabs that one
+function setGlow(o, on){ if (o) o.material.emissive.setHex(on ? 0x5a5a5a : 0x000000); }
+function nearest(x, y, R){
+  let best = null, bd = R;
+  const test = t => { if (t.userData.held) return; const p = toScreen(t), d = Math.hypot(p.x-x, p.y-y); if (d < bd){ bd = d; best = t; } };
+  loose.forEach(test);
+  stacks.forEach(st => { if (st.length) test(st[st.length-1]); });
+  return best;
+}
+function grab(t){
+  const u = t.userData;
+  if (u.held) return null;
+  if (u.cell){
+    const st = stackAt(u.cell[0], u.cell[1]);
+    if (st[st.length-1] !== t) return null;
+    st.pop(); u.cell = null; u.fall = false;
+  } else { const k = loose.indexOf(t); if (k < 0) return null; loose.splice(k, 1); }
+  u.held = true; u.sh.visible = false; t.scale.setScalar(1.15); count(); return t;
+}
+// where a carried block would land: it stays under your fingers, hovering just above what is below it
+function holdTarget(x, y){
+  let hy = 1.5, loc = null, c = null;
+  for (let k = 0; k < 3; k++){
+    floor.constant = -(tableY + hy);
+    raycaster.setFromCamera({ x: x/W*2-1, y: -(y/H)*2+1 }, camera);
+    if (!raycaster.ray.intersectPlane(floor, hit)) return null;
+    loc = board.worldToLocal(hit.clone()); c = snapCell(loc.x, loc.z);
+    hy = lenAt(c[0], c[1]) + 1.5;
   }
-  if (!best) return null;
-  if (from === 'tray'){ const b = makeBlock(best.userData.type); b.position.copy(best.position); board.add(b); return b; }
-  const c = best.userData.cell; stacks[c[0]][c[1]].pop(); best.userData.fall = false; count(); return best;
+  return { x: loc.x, z: loc.z, y: hy, cell: c };
 }
 function release(s){
-  const o = s.obj; s.obj = null; ghost.visible = false;
-  const c = s.has ? cellOf(s.hx, s.hz) : null;
-  if (!c || stacks[c[0]][c[1]].length >= 8){ board.remove(o); return; }
-  const st = stacks[c[0]][c[1]], u = o.userData;
-  u.cell = c; u.tx = c[0]-3.5; u.ty = st.length + .5; u.tz = c[1]-3.5; u.vy = 0; u.fall = true;
+  const o = s.obj; s.obj = null; ghost.visible = false; dropLine.visible = false;
+  const u = o.userData; u.held = false;
+  const c = s.cell; s.cell = null;
+  if (!c || lenAt(c[0], c[1]) >= 8){ u.y0 = o.position.y; loose.push(o); count(); return; }
+  const st = stackAt(c[0], c[1]);
+  u.cell = c; u.tx = c[0]; u.ty = st.length + .5; u.tz = c[1]; u.vy = 0; u.fall = true;
   st.push(o); count();
 }
-function handLogic(){
+function handLogic(dt){
   for (let i = 0; i < 2; i++){
     const h = hands[i], s = holds[i];
-    if (!h){ if (s.obj) release(s); s.pinched = false; continue; }
-    const was = s.pinched;
-    if (!s.pinched && h.ratio < .38) s.pinched = true; else if (s.pinched && h.ratio > .55) s.pinched = false;
-    const p = rayAt(h.cx, h.cy); if (p){ board.worldToLocal(p); s.hx = p.x; s.hz = p.z; s.has = true; }
-    if (s.pinched && !was && !s.obj) s.obj = pickAt(h.cx, h.cy);
-    if (s.obj && s.pinched && s.has){
-      const c = cellOf(s.hx, s.hz), base = c ? stacks[c[0]][c[1]].length : 0, o = s.obj;
-      o.position.x += (s.hx - o.position.x)*.45; o.position.z += (s.hz - o.position.z)*.45; o.position.y += (base + 1.6 - o.position.y)*.45;
-      if (c){ ghost.visible = true; ghost.position.set(c[0]-3.5, base + .5, c[1]-3.5); } else ghost.visible = false;
+    if (!h){
+      s.lostT += dt;
+      if (s.hoverObj){ setGlow(s.hoverObj, false); s.hoverObj = null; s.hover = null; }
+      if (s.lostT > .4){ if (s.obj) release(s); s.pinched = false; s.on = s.off = 0; }
+      continue;
+    }
+    s.lostT = 0;
+    if (!s.init){ s.px = h.cx; s.py = h.cy; s.ratio = h.rawRatio; s.init = true; }
+    const sp = Math.hypot(h.cx - s.px, h.cy - s.py), a = Math.min(.9, .3 + sp/60);
+    s.px += (h.cx - s.px)*a; s.py += (h.cy - s.py)*a;
+    s.ratio += (h.rawRatio - s.ratio)*.5; h.ratio = s.ratio;
+    const ON = h.wl ? .30 : .38, OFF = h.wl ? .50 : .55, was = s.pinched;
+    if (!s.pinched){ s.on = s.ratio < ON ? s.on + 1 : 0; if (s.on >= 2){ s.pinched = true; s.on = 0; } }
+    else { s.off = s.ratio > OFF ? s.off + 1 : 0; if (s.off >= 2){ s.pinched = false; s.off = 0; } }
+    if (!s.pinched && !s.obj && s.ratio > .55){
+      const n = nearest(s.px, s.py, 100);
+      if (n !== s.hoverObj){ setGlow(s.hoverObj, false); setGlow(n, true); s.hoverObj = n; }
+      s.hover = n;
+    }
+    if (s.pinched && !was && !s.obj){
+      let t = s.hover ? grab(s.hover) : null;
+      if (!t){ const n = nearest(s.px, s.py, 100); t = n ? grab(n) : null; }
+      s.obj = t; setGlow(s.hoverObj, false); s.hoverObj = null; s.hover = null;
+      if (t) setStatus('');
+    }
+    if (s.obj && s.pinched){
+      const o = s.obj, tg = holdTarget(s.px, s.py);
+      if (tg){
+        const c = tg.cell, ok = lenAt(c[0], c[1]) < 8;
+        o.position.x += ((tg.x + (c[0] - tg.x)*.5) - o.position.x)*.5;
+        o.position.z += ((tg.z + (c[1] - tg.z)*.5) - o.position.z)*.5;
+        o.position.y += (tg.y - o.position.y)*.5;
+        s.cell = ok ? c : null;
+        if (ok){ ghost.visible = true; ghost.position.set(c[0], lenAt(c[0], c[1]) + .5, c[1]); updateDropLine(o.position, ghost.position); }
+        else { ghost.visible = false; dropLine.visible = false; }
+      }
+      o.scale.setScalar(1 + (o.scale.x - 1)*.8);
     }
     if (s.obj && !s.pinched) release(s);
   }
-  if (!holds[0].obj && !holds[1].obj) ghost.visible = false;
+  if (!holds[0].obj && !holds[1].obj){ ghost.visible = false; dropLine.visible = false; }
 }
-function falling(dt){
-  stacks.forEach(r => r.forEach(st => st.forEach(o => {
-    const u = o.userData; if (!u.fall) return;
+function falling(dt, t){
+  loose.forEach(m => { m.rotation.y += dt*.8; m.position.y = m.userData.y0 + Math.sin(t/600 + m.userData.ph)*.18; });
+  stacks.forEach(st => st.forEach(o => {
+    const u = o.userData;
+    if (o.scale.x > 1.001) o.scale.setScalar(1 + (o.scale.x - 1)*Math.max(0, 1 - 10*dt));
+    u.sh.visible = !u.fall && o.position.y < .56;
+    if (!u.fall) return;
     u.vy -= 25*dt; o.position.y += u.vy*dt;
     const k = Math.min(1, 14*dt); o.position.x += (u.tx - o.position.x)*k; o.position.z += (u.tz - o.position.z)*k;
-    if (o.position.y <= u.ty){ o.position.set(u.tx, u.ty, u.tz); u.fall = false; }
-  })));
+    if (o.position.y <= u.ty){ o.position.set(u.tx, u.ty, u.tz); u.fall = false; o.scale.setScalar(1.12); }
+  }));
+}
+// arrow at the screen edge pointing toward the nearest material when none is on screen
+const _v = new THREE.Vector3();
+function hint(){
+  if (!anchored || !loose.length || holds.some(s => s.obj)) return;
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  let best = null, bd = -2;
+  for (const m of loose){
+    m.getWorldPosition(_v);
+    const p = _v.clone().project(camera); if (p.z < 1 && Math.abs(p.x) < .92 && Math.abs(p.y) < .92) return;
+    const d = _v.clone().normalize().dot(fwd); if (d > bd){ bd = d; best = _v.clone(); }
+  }
+  if (!best) return;
+  best.applyMatrix4(camera.matrixWorldInverse);
+  let dx = best.x, dy = -best.y; const m = Math.hypot(dx, dy) || 1; dx /= m; dy /= m;
+  const t = Math.min((W/2 - 36)/(Math.abs(dx) || 1e-3), (H/2 - 130)/(Math.abs(dy) || 1e-3));
+  octx.save(); octx.translate(W/2 + dx*t, H/2 + dy*t); octx.rotate(Math.atan2(dy, dx));
+  octx.fillStyle = '#ffb83d'; octx.beginPath(); octx.moveTo(20, 0); octx.lineTo(-12, -15); octx.lineTo(-12, 15); octx.closePath(); octx.fill(); octx.restore();
 }
 function drawHands(){
   octx.clearRect(0, 0, W, H);
   const bones = [[0,1,2,3,4],[0,5,6,7,8],[9,10,11,12],[13,14,15,16],[0,17,18,19,20],[5,9,13,17]];
-  hands.forEach(h => {
-    octx.strokeStyle = 'rgba(244,239,230,.75)'; octx.lineWidth = 3;
+  hands.forEach((h, i) => {
+    const s = holds[i];
+    octx.strokeStyle = 'rgba(244,239,230,.7)'; octx.lineWidth = 3;
     bones.forEach(ch => { octx.beginPath(); ch.forEach((k, j) => j ? octx.lineTo(h.p[k].x, h.p[k].y) : octx.moveTo(h.p[k].x, h.p[k].y)); octx.stroke(); });
-    const pin = h.ratio < .45; octx.fillStyle = pin ? '#ffb83d' : '#2fd3c0';
-    octx.beginPath(); octx.arc(h.cx, h.cy, pin ? 14 : 9, 0, 7); octx.fill();
+    const cx = s.init ? s.px : h.cx, cy = s.init ? s.py : h.cy;
+    if (s.pinched){ octx.fillStyle = '#ffb83d'; octx.beginPath(); octx.arc(cx, cy, 13, 0, 7); octx.fill(); }
+    else { octx.strokeStyle = '#2fd3c0'; octx.lineWidth = 4; octx.beginPath(); octx.arc(cx, cy, 9 + 16*Math.min(1, s.ratio), 0, 7); octx.stroke(); }
   });
   if (!anchored && hands[0] && progress > 0){
     const c = hands[0].p[9]; octx.strokeStyle = '#ffb83d'; octx.lineWidth = 6;
     octx.beginPath(); octx.arc(c.x, c.y, 40, -Math.PI/2, -Math.PI/2 + progress*Math.PI*2); octx.stroke();
   }
+  hint();
 }
 function frame(t){
   const dt = Math.min((t - last)/1000, .05); last = t;
   updateOrientation(); calibrate(dt);
-  if (anchored){ handLogic(); falling(dt); tray.forEach(m => m.rotation.y += dt*.8); }
+  if (anchored){ handLogic(dt); falling(dt, t); }
   renderer.render(scene, camera); drawHands();
   if (video.readyState >= 2 && !sending && window.handsModel){
     sending = true; handsModel.send({ image: video }).catch(() => {}).finally(() => { sending = false; });
@@ -236,7 +339,8 @@ function reanchor(){
   setStatus('Rest your open hand flat on the table and hold still');
 }
 $('recal').addEventListener('click', reanchor);
-$('clear').addEventListener('click', () => { stacks.forEach(r => r.forEach(st => { st.forEach(o => board.remove(o)); st.length = 0; })); count(); });
+$('more').addEventListener('click', () => { if (anchored) scatter(6); });
+$('clear').addEventListener('click', () => { stacks.forEach(st => st.forEach(o => board.remove(o))); stacks.clear(); count(); });
 $('start').addEventListener('click', async () => {
   const msg = $('msg'); msg.textContent = 'Starting camera\u2026';
   try {
@@ -251,7 +355,7 @@ $('start').addEventListener('click', async () => {
       msg.textContent = 'Loading hand tracking\u2026';
       await m.initialize(); window.handsModel = m;
     }
-    msg.textContent = ''; $('panel').hidden = true; $('bar').hidden = false;
+    msg.textContent = ''; $('panel').hidden = true; $('bar').hidden = false; count();
     setStatus('Rest your open hand flat on the table and hold still');
   } catch (e) {
     msg.textContent = 'Camera or hand tracking could not start. Open this page over https and allow camera access.';
