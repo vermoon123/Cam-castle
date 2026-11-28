@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Table Fort</title>
+<title>Table Craft</title>
 <style>
-  :root { --ink:#f4efe6; --night:#10151c; --teal:#2fd3c0; --amber:#ffb83d; }
+  :root { --ink:#f4efe6; --night:#10151c; --teal:#2fd3c0; --amber:#ffb83d; --red:#ff6b5a; }
   * { box-sizing:border-box; }
   [hidden] { display:none !important; }
   html,body { margin:0; height:100%; background:var(--night); color:var(--ink); font-family:"Trebuchet MS",system-ui,sans-serif; overflow:hidden; }
@@ -13,12 +13,18 @@
   video { object-fit:cover; }
   #shade { background:rgba(16,21,28,.12); }
   canvas { pointer-events:none; }
-  #bar { position:fixed; top:env(safe-area-inset-top,0px); left:0; right:0; z-index:5; display:flex; justify-content:space-between; align-items:center; padding:12px 12px; gap:6px; font-weight:700; font-size:13px; text-shadow:0 2px 6px rgba(0,0,0,.7); }
+  #bar { position:fixed; top:env(safe-area-inset-top,0px); left:0; right:0; z-index:5; display:flex; justify-content:space-between; align-items:center; padding:12px; gap:6px; font-weight:700; font-size:13px; text-shadow:0 2px 6px rgba(0,0,0,.7); }
   .grp { display:flex; gap:6px; }
   button { font:inherit; font-weight:700; font-size:16px; padding:12px 24px; border:0; border-radius:14px; background:var(--teal); color:#06231f; }
   #bar button { font-size:13px; padding:9px 12px; background:rgba(244,239,230,.92); color:var(--night); }
   button:focus-visible { outline:3px solid var(--amber); outline-offset:3px; }
+  #hotbar { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 14px); z-index:5; display:flex; justify-content:center; gap:8px; padding:0 10px; }
+  .slot { width:52px; height:52px; padding:0; border:3px solid rgba(255,255,255,.55); border-radius:10px; background-size:cover; image-rendering:pixelated; color:#fff; font-size:12px; text-shadow:0 1px 3px #000; }
+  .slot.on { border-color:var(--amber); transform:scale(1.14); }
+  .slot.brk { background:#5b1f1a; border-color:rgba(255,107,90,.8); }
   #status { position:fixed; top:calc(env(safe-area-inset-top,0px) + 64px); left:50%; transform:translateX(-50%); z-index:5; padding:9px 16px; border-radius:12px; background:rgba(16,21,28,.82); font-size:15px; text-align:center; max-width:90vw; }
+  #warn { position:fixed; top:calc(env(safe-area-inset-top,0px) + 120px); left:50%; transform:translateX(-50%); z-index:5; padding:10px 14px; border-radius:12px; background:rgba(91,31,26,.92); border:2px solid var(--red); font-size:14px; line-height:1.4; text-align:center; width:min(92vw,420px); }
+  a { color:var(--amber); font-weight:700; }
   #panel { position:fixed; inset:0; z-index:6; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center; background:rgba(16,21,28,.88); }
   #panel h1 { margin:0; font-size:42px; letter-spacing:-.5px; }
   #panel p { margin:0; max-width:34ch; line-height:1.5; opacity:.92; }
@@ -31,12 +37,15 @@
 <canvas id="gl"></canvas>
 <canvas id="ov"></canvas>
 <div id="status" hidden></div>
-<div id="bar" hidden><button id="clear">Clear</button><span id="count"></span><span class="grp"><button id="more">More</button><button id="recal">Re-anchor</button></span></div>
+<div id="warn" hidden></div>
+<div id="bar" hidden><button id="clear">Clear</button><span id="count"></span><span class="grp"><button id="house">House</button><button id="recal">Re-anchor</button></span></div>
+<div id="hotbar" hidden></div>
 <div id="panel">
-  <h1>Table Fort</h1>
-  <p>Prop your phone up so the back camera sees your table. Rest your open hand flat on the table and hold still for a second to set the table height. Then materials appear around you: turn your phone to find them, pinch to grab, carry them to one spot and let go. Pieces that land near each other snap together and build.</p>
+  <h1>Table Craft</h1>
+  <p>Prop your phone up so the back camera sees your table. Rest your open hand flat on the table and hold still for a second. Then point with your index finger to aim, and pinch to place the selected block. Pick Break to remove blocks, or tap House to auto-build one.</p>
   <button id="start">Start camera</button>
   <div id="msg"></div>
+  <p>Want blocks that stay put even when you walk around the table? Try <a href="ar.html">AR mode</a> (touch controls).</p>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -45,8 +54,8 @@
 const $ = id => document.getElementById(id);
 const video = $('cam'), gl = $('gl'), ov = $('ov'), octx = ov.getContext('2d');
 let W = innerWidth, H = innerHeight, hands = [], sending = false, last = 0;
-let anchored = false, scattered = false, tableY = 0, holdT = 0, holdRef = null, progress = 0;
-const UNIT = 0.05; // one block = 5 cm on your real table
+let anchored = false, tableY = 0, holdT = 0, holdRef = null, progress = 0;
+const UNIT = 0.04; // one block = 4 cm on your real table
 const FOCAL = parseFloat(new URLSearchParams(location.search).get('f')) || .78;
 const D2R = Math.PI/180;
 
@@ -55,8 +64,8 @@ renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
 renderer.setClearColor(0x000000, 0);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, 1, .05, 300);
-scene.add(new THREE.AmbientLight(0xffffff, .8));
-const sun = new THREE.DirectionalLight(0xffffff, .8); sun.position.set(3, 8, 5); scene.add(sun);
+scene.add(new THREE.AmbientLight(0xffffff, .85));
+const sun = new THREE.DirectionalLight(0xffffff, .7); sun.position.set(3, 8, 5); scene.add(sun);
 
 function resize(){
   W = innerWidth; H = innerHeight;
@@ -64,8 +73,7 @@ function resize(){
   const d = devicePixelRatio || 1; ov.width = W*d; ov.height = H*d; octx.setTransform(d,0,0,d,0,0);
   refreshCam();
 }
-// match the 3D camera to the real camera so blocks line up with the video
-function refreshCam(){
+function refreshCam(){ // match the 3D camera to the real one so blocks line up with the video
   camera.aspect = W/H;
   const vw = video.videoWidth || 640, vh = video.videoHeight || 480, sc = Math.max(W/vw, H/vh);
   camera.fov = 2*Math.atan((H/2)/(FOCAL*vw*sc))*180/Math.PI;
@@ -73,91 +81,116 @@ function refreshCam(){
 }
 addEventListener('resize', resize); resize();
 
-// phone tilt (gyro): which way is down, and where the phone is pointing
-let ori = { a: 0, b: 0, g: 0, ok: false };
+// phone tilt (gyro): which way is down, and where the phone points
+let ori = { a: 0, b: 0, g: 0, ok: false }, absOri = { a: 0, b: 0, g: 0, ok: false }, startedAt = 0, warned = false;
 addEventListener('deviceorientation', e => { if (e.beta == null) return; ori = { a: e.alpha || 0, b: e.beta, g: e.gamma || 0, ok: true }; });
+addEventListener('deviceorientationabsolute', e => { if (e.beta == null) return; absOri = { a: e.alpha || 0, b: e.beta, g: e.gamma || 0, ok: true }; });
 const zee = new THREE.Vector3(0, 0, 1), eul = new THREE.Euler(), q0 = new THREE.Quaternion(), q1 = new THREE.Quaternion(-Math.sqrt(.5), 0, 0, Math.sqrt(.5)), tq = new THREE.Quaternion();
 function updateOrientation(){
-  if (ori.ok){
+  const o = ori.ok ? ori : absOri;
+  if (o.ok){
     const orient = ((screen.orientation && screen.orientation.angle) || window.orientation || 0)*D2R;
-    eul.set(ori.b*D2R, ori.a*D2R, -ori.g*D2R, 'YXZ'); tq.setFromEuler(eul);
+    eul.set(o.b*D2R, o.a*D2R, -o.g*D2R, 'YXZ'); tq.setFromEuler(eul);
     tq.multiply(q1); tq.multiply(q0.setFromAxisAngle(zee, -orient));
   } else { eul.set(-Math.PI/4, 0, 0); tq.setFromEuler(eul); }
   camera.quaternion.slerp(tq, .5);
   camera.updateMatrixWorld(true);
 }
 
-// board = build area frame, set on your real table when you anchor. Nothing of it is drawn.
+// ---- pixel-art block textures (Minecraft style) ----
+function tex(draw){
+  const c = document.createElement('canvas'); c.width = c.height = 16; const g = c.getContext('2d'); draw(g);
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.userData = { url: c.toDataURL() }; return t;
+}
+function speckle(g, base, vars, n){
+  g.fillStyle = base; g.fillRect(0, 0, 16, 16);
+  for (let i = 0; i < n; i++){ g.fillStyle = vars[(Math.random()*vars.length)|0]; g.fillRect((Math.random()*16)|0, (Math.random()*16)|0, 1, 1); }
+}
+const tPlanks = tex(g => { speckle(g, '#b8854a', ['#a8763e', '#c8955a'], 60); g.fillStyle = '#8a5d2b'; [0, 4, 8, 12].forEach(y => g.fillRect(0, y + 3, 16, 1)); g.fillRect(5, 0, 1, 3); g.fillRect(11, 4, 1, 3); g.fillRect(3, 8, 1, 3); g.fillRect(9, 12, 1, 3); });
+const tStone = tex(g => speckle(g, '#8e9297', ['#7d8186', '#9fa3a8', '#6f7378'], 90));
+const tBrick = tex(g => { g.fillStyle = '#a24a3b'; g.fillRect(0, 0, 16, 16); g.fillStyle = '#cfc6bb'; [0, 4, 8, 12].forEach((y, r) => { g.fillRect(0, y, 16, 1); const o = r % 2 ? 0 : 4; g.fillRect(o, y, 1, 4); g.fillRect(o + 8, y, 1, 4); }); });
+const tGlass = tex(g => { g.clearRect(0, 0, 16, 16); g.fillStyle = 'rgba(190,230,255,.35)'; g.fillRect(0, 0, 16, 16); g.fillStyle = '#e8f6ff'; g.fillRect(0, 0, 16, 1); g.fillRect(0, 15, 16, 1); g.fillRect(0, 0, 1, 16); g.fillRect(15, 0, 1, 16); g.fillRect(3, 3, 2, 1); g.fillRect(3, 4, 1, 2); });
+const tGrassTop = tex(g => speckle(g, '#5fa043', ['#4f8f36', '#72b552', '#4a8532'], 80));
+const tDirt = tex(g => speckle(g, '#7a5230', ['#6a4528', '#8a5f3a', '#5c3b22'], 80));
+const tGrassSide = tex(g => { speckle(g, '#7a5230', ['#6a4528', '#8a5f3a', '#5c3b22'], 70); g.fillStyle = '#5fa043'; g.fillRect(0, 0, 16, 4); g.fillStyle = '#4f8f36'; for (let x = 0; x < 16; x += 2) g.fillRect(x, 4, 1, 1 + ((x*7)%3 ? 1 : 0)); });
+const lam = t => new THREE.MeshLambertMaterial({ map: t });
+const MATS = [
+  lam(tPlanks), lam(tStone), lam(tBrick),
+  new THREE.MeshLambertMaterial({ map: tGlass, transparent: true, depthWrite: false }),
+  [lam(tGrassSide), lam(tGrassSide), lam(tGrassTop), lam(tDirt), lam(tGrassSide), lam(tGrassSide)]
+];
+const NAMES = ['Planks', 'Stone', 'Brick', 'Glass', 'Grass'];
+const ICONS = [tPlanks, tStone, tBrick, tGlass, tGrassTop].map(t => t.userData.url);
+
+// ---- world: blocks live in the board frame, cell (i,k,j) covers x in [i-.5,i+.5], y in [k,k+1], z in [j-.5,j+.5] ----
 const board = new THREE.Group(); board.visible = false; scene.add(board);
-
-const TYPES = [ { color: 0xc98b4e }, { color: 0x9aa3ad }, { color: 0xd9503f }, { color: 0x8fd8ff, opacity: .65 } ];
-const boxGeo = new THREE.BoxGeometry(.94, .94, .94), edgeGeo = new THREE.EdgesGeometry(boxGeo), edgeMat = new THREE.LineBasicMaterial({ color: 0x10151c });
-const shGeo = new THREE.CircleGeometry(.68, 20), shMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .3, depthWrite: false });
-function makeBlock(t){
-  const m = new THREE.Mesh(boxGeo, new THREE.MeshLambertMaterial({ color: t.color, transparent: !!t.opacity, opacity: t.opacity || 1 }));
-  m.add(new THREE.LineSegments(edgeGeo, edgeMat));
-  const sh = new THREE.Mesh(shGeo, shMat); sh.rotation.x = -Math.PI/2; sh.position.y = -.475; sh.visible = false; m.add(sh);
-  m.userData = { type: t, sh }; return m;
-}
-const loose = [];            // materials floating around, waiting to be found
-const stacks = new Map();    // "i,j" -> blocks stacked on that cell
-const stackAt = (i, j) => { const k = i + ',' + j; let s = stacks.get(k); if (!s){ s = []; stacks.set(k, s); } return s; };
-const lenAt = (i, j) => (stacks.get(i + ',' + j) || []).length;
-const ghost = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)), new THREE.LineBasicMaterial({ color: 0xffb83d }));
-ghost.visible = false; board.add(ghost);
-const dropLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineBasicMaterial({ color: 0xffb83d }));
-dropLine.visible = false; dropLine.frustumCulled = false; board.add(dropLine);
-function updateDropLine(a, b){ const pos = dropLine.geometry.attributes.position; pos.setXYZ(0, a.x, a.y, a.z); pos.setXYZ(1, b.x, b.y, b.z); pos.needsUpdate = true; dropLine.visible = true; }
-
-function count(){ let n = 0; stacks.forEach(s => n += s.length); $('count').textContent = 'Placed ' + n + ' | Left ' + loose.length; }
+const boxGeo = new THREE.BoxGeometry(1, 1, 1), shGeo = new THREE.CircleGeometry(.72, 20), shMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .3, depthWrite: false });
+const blocks = new Map(), popping = [], queue = [];
+let sel = 0, mode = 'place', lastPlace = [0, 0, 0], lastAct = 0, lastBuild = 0;
+const key = (i, k, j) => i + ',' + k + ',' + j;
+function count(){ $('count').textContent = 'Blocks ' + blocks.size; }
 function setStatus(t){ const e = $('status'); e.textContent = t; e.hidden = !t; }
-const cellOf = (x, z) => [Math.round(x), Math.round(z)];
-// auto-build: a dropped piece snaps onto, or beside, the nearest piece already placed
-function snapCell(x, z){
-  let best = null, bd = 2.4;
-  for (const [k, st] of stacks){
-    if (!st.length) continue;
-    const [a, b] = k.split(',').map(Number);
-    for (let da = -1; da <= 1; da++) for (let db = -1; db <= 1; db++){
-      const i = a + da, j = b + db; if (lenAt(i, j) >= 8) continue;
-      const d = Math.hypot(i - x, j - z); if (d < bd){ bd = d; best = [i, j]; }
-    }
-  }
-  return best || cellOf(x, z);
+function addBlock(i, k, j, t, pop){
+  const kk = key(i, k, j); if (blocks.has(kk) || k < 0 || k > 16) return false;
+  const m = new THREE.Mesh(boxGeo, MATS[t]); m.position.set(i, k + .5, j); m.userData = { key: kk };
+  if (k === 0){ const sh = new THREE.Mesh(shGeo, shMat); sh.rotation.x = -Math.PI/2; sh.position.y = -.495; m.add(sh); }
+  if (pop){ m.scale.setScalar(.5); popping.push(m); }
+  board.add(m); blocks.set(kk, m); count(); return true;
 }
-// scatter materials in a wide arc around you, at table height, so you have to look around to find them
-function scatter(n){
-  const P = board.position, dP = Math.max(6, Math.hypot(P.x, P.z)), base = Math.atan2(P.x, P.z), v = new THREE.Vector3();
-  for (let k = 0; k < n; k++){
-    const a = base + (Math.random() - .5)*2.7, r = dP*(.7 + Math.random()*1.0);
-    v.set(Math.sin(a)*r, tableY + 1.2 + Math.random()*1.6, Math.cos(a)*r);
-    const m = makeBlock(TYPES[(Math.random()*TYPES.length)|0]);
-    m.position.copy(board.worldToLocal(v.clone())); m.userData.y0 = m.position.y; m.userData.ph = Math.random()*6;
-    board.add(m); loose.push(m);
+function removeBlock(c){ const kk = key(c[0], c[1], c[2]), m = blocks.get(kk); if (!m) return; board.remove(m); blocks.delete(kk); count(); }
+
+const ghost = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.03, 1.03, 1.03)), new THREE.LineBasicMaterial({ color: 0xffb83d }));
+ghost.visible = false; board.add(ghost);
+
+// voxel ray walk: first solid block along the ray, plus the empty cell just before it (where a new block goes)
+function traverse(o, d, has){
+  const px = o.x + .5, py = o.y, pz = o.z + .5;
+  let i = Math.floor(px), k = Math.floor(py), j = Math.floor(pz);
+  const sx = Math.sign(d.x), sy = Math.sign(d.y), sz = Math.sign(d.z);
+  const dx = sx ? Math.abs(1/d.x) : 1e9, dy = sy ? Math.abs(1/d.y) : 1e9, dz = sz ? Math.abs(1/d.z) : 1e9;
+  let tx = sx ? (sx > 0 ? i + 1 - px : px - i)*dx : 1e9, ty = sy ? (sy > 0 ? k + 1 - py : py - k)*dy : 1e9, tz = sz ? (sz > 0 ? j + 1 - pz : pz - j)*dz : 1e9;
+  let prev = null;
+  for (let n = 0; n < 160; n++){
+    if (k < 0) return prev ? { place: prev, hit: null } : null;
+    if (has(i, k, j)) return { place: prev, hit: [i, k, j] };
+    prev = [i, k, j];
+    if (tx < ty && tx < tz){ i += sx; tx += dx; } else if (ty < tz){ k += sy; ty += dy; } else { j += sz; tz += dz; }
   }
-  count();
+  return null;
+}
+const raycaster = new THREE.Raycaster();
+function aimTarget(x, y){
+  raycaster.setFromCamera({ x: x/W*2-1, y: -(y/H)*2+1 }, camera);
+  const inv = board.matrixWorld.clone().invert();
+  const o = raycaster.ray.origin.clone().applyMatrix4(inv), d = raycaster.ray.direction.clone().transformDirection(inv);
+  const r = traverse(o, d, (i, k, j) => blocks.has(key(i, k, j)));
+  if (!r || (r.place && (Math.abs(r.place[0]) > 25 || Math.abs(r.place[2]) > 25))) return null;
+  return r;
 }
 
-// screen helpers
-const tmp = new THREE.Vector3(), raycaster = new THREE.Raycaster(), floor = new THREE.Plane(new THREE.Vector3(0,1,0), 0), hit = new THREE.Vector3();
-function toScreen(o){ o.getWorldPosition(tmp); tmp.project(camera); return { x: (tmp.x+1)/2*W, y: (1-tmp.y)/2*H }; }
+// ---- hotbar ----
+const bar = $('hotbar');
+ICONS.forEach((u, n) => { const b = document.createElement('button'); b.className = 'slot'; b.style.backgroundImage = 'url(' + u + ')'; b.setAttribute('aria-label', NAMES[n]); b.addEventListener('click', () => choose(n)); bar.appendChild(b); });
+{ const b = document.createElement('button'); b.className = 'slot brk'; b.textContent = 'Break'; b.addEventListener('click', () => choose(5)); bar.appendChild(b); }
+function choose(n){ if (n === 5) mode = 'break'; else { mode = 'place'; sel = n; } [...bar.children].forEach((b, i) => b.classList.toggle('on', mode === 'break' ? i === 5 : i === sel)); }
+choose(0);
+
+// ---- hands ----
+const holds = [0, 1].map(() => ({ pinched: false, init: false, px: 0, py: 0, ratio: 1, on: 0, off: 0, lostT: 0, tgt: null, ui: null }));
+const d3w = (L, lm, a, b) => L ? Math.hypot(L[a].x-L[b].x, L[a].y-L[b].y, L[a].z-L[b].z) : Math.hypot(lm[a].x-lm[b].x, lm[a].y-lm[b].y);
 function map(l){
   const vw = video.videoWidth || 640, vh = video.videoHeight || 480, s = Math.max(W/vw, H/vh), ox = (W - vw*s)/2, oy = (H - vh*s)/2;
   return { x: ox + l.x*vw*s, y: oy + l.y*vh*s };
 }
-
-// hands
-const holds = [0, 1].map(() => ({ obj: null, pinched: false, init: false, px: 0, py: 0, ratio: 1, on: 0, off: 0, lostT: 0, hover: null, hoverObj: null, cell: null }));
-const d3w = (L, lm, a, b) => L ? Math.hypot(L[a].x-L[b].x, L[a].y-L[b].y, L[a].z-L[b].z) : Math.hypot(lm[a].x-lm[b].x, lm[a].y-lm[b].y);
 function updateHands(res){
   const wls = res.multiHandWorldLandmarks || [];
   hands = (res.multiHandLandmarks || []).slice(0, 2).map((lm, i) => {
     const p = lm.map(map), L = wls[i];
-    return { p, raw: lm, wl: L, rawRatio: d3w(L, lm, 4, 8)/(d3w(L, lm, 0, 9) || .1), ratio: 1, cx: (p[4].x+p[8].x)/2, cy: (p[4].y+p[8].y)/2 };
+    return { p, raw: lm, wl: L, rawRatio: d3w(L, lm, 4, 8)/(d3w(L, lm, 0, 9) || .1), ratio: 1, ax: p[8].x, ay: p[8].y };
   });
 }
 
-// anchoring: an open hand resting on the table gives a point on the table (distance comes from palm size)
+// ---- anchoring: an open hand resting on the table gives a point on the table (distance comes from palm size) ----
 function palmPoint(h){
   const lm = h.raw, wl = h.wl, vw = video.videoWidth || 640, vh = video.videoHeight || 480, f = FOCAL*vw;
   const pairs = [[0,9,.10],[5,17,.075],[0,17,.09]], zs = [];
@@ -174,15 +207,13 @@ function palmPoint(h){
 function placeBoard(P){
   board.position.copy(P); board.rotation.y = Math.atan2(-P.x, -P.z); tableY = P.y;
   board.visible = true; board.updateMatrixWorld(true); anchored = true; progress = 0;
-  if (!scattered){ scattered = true; scatter(12); }
-  setStatus('Turn your phone to find materials, then pinch to grab');
+  setStatus('Point with your index finger and pinch to place a block');
 }
 function calibrate(dt){
   if (anchored) return;
   const h = hands[0];
   if (!h){ holdT = 0; holdRef = null; progress = 0; return; }
-  const lm = h.raw, L = h.wl;
-  const palm = d3w(L, lm, 0, 9), open = d3w(L, lm, 0, 8) > 1.5*palm && d3w(L, lm, 0, 12) > 1.5*palm;
+  const lm = h.raw, L = h.wl, palm = d3w(L, lm, 0, 9), open = d3w(L, lm, 0, 8) > 1.5*palm && d3w(L, lm, 0, 12) > 1.5*palm;
   const c = { x: h.p[9].x, y: h.p[9].y };
   if (!open || (holdRef && Math.hypot(c.x-holdRef.x, c.y-holdRef.y) > 22)){ holdRef = c; holdT = 0; progress = 0; return; }
   if (!holdRef) holdRef = c;
@@ -190,142 +221,93 @@ function calibrate(dt){
   if (holdT >= 1.2){ const P = palmPoint(h); if (P) placeBoard(P); holdT = 0; }
 }
 
-// picking: the piece under your open hand glows, and pinching grabs that one
-function setGlow(o, on){ if (o) o.material.emissive.setHex(on ? 0x5a5a5a : 0x000000); }
-function nearest(x, y, R){
-  let best = null, bd = R;
-  const test = t => { if (t.userData.held) return; const p = toScreen(t), d = Math.hypot(p.x-x, p.y-y); if (d < bd){ bd = d; best = t; } };
-  loose.forEach(test);
-  stacks.forEach(st => { if (st.length) test(st[st.length-1]); });
-  return best;
+// ---- aiming and pinching: aim is the index fingertip (it barely moves when you pinch) ----
+function act(t, now){
+  if (now - lastAct < 250) return; lastAct = now;
+  if (mode === 'break'){ if (t.hit) removeBlock(t.hit); }
+  else if (t.place){ addBlock(t.place[0], t.place[1], t.place[2], sel, true); lastPlace = t.place; }
+  setStatus('');
 }
-function grab(t){
-  const u = t.userData;
-  if (u.held) return null;
-  if (u.cell){
-    const st = stackAt(u.cell[0], u.cell[1]);
-    if (st[st.length-1] !== t) return null;
-    st.pop(); u.cell = null; u.fall = false;
-  } else { const k = loose.indexOf(t); if (k < 0) return null; loose.splice(k, 1); }
-  u.held = true; u.sh.visible = false; t.scale.setScalar(1.15); count(); return t;
-}
-// where a carried block would land: it stays under your fingers, hovering just above what is below it
-function holdTarget(x, y){
-  let hy = 1.5, loc = null, c = null;
-  for (let k = 0; k < 3; k++){
-    floor.constant = -(tableY + hy);
-    raycaster.setFromCamera({ x: x/W*2-1, y: -(y/H)*2+1 }, camera);
-    if (!raycaster.ray.intersectPlane(floor, hit)) return null;
-    loc = board.worldToLocal(hit.clone()); c = snapCell(loc.x, loc.z);
-    hy = lenAt(c[0], c[1]) + 1.5;
-  }
-  return { x: loc.x, z: loc.z, y: hy, cell: c };
-}
-function release(s){
-  const o = s.obj; s.obj = null; ghost.visible = false; dropLine.visible = false;
-  const u = o.userData; u.held = false;
-  const c = s.cell; s.cell = null;
-  if (!c || lenAt(c[0], c[1]) >= 8){ u.y0 = o.position.y; loose.push(o); count(); return; }
-  const st = stackAt(c[0], c[1]);
-  u.cell = c; u.tx = c[0]; u.ty = st.length + .5; u.tz = c[1]; u.vy = 0; u.fall = true;
-  st.push(o); count();
-}
-function handLogic(dt){
+function handLogic(dt, now){
+  let shown = null;
   for (let i = 0; i < 2; i++){
     const h = hands[i], s = holds[i];
-    if (!h){
-      s.lostT += dt;
-      if (s.hoverObj){ setGlow(s.hoverObj, false); s.hoverObj = null; s.hover = null; }
-      if (s.lostT > .4){ if (s.obj) release(s); s.pinched = false; s.on = s.off = 0; }
-      continue;
-    }
+    if (!h){ s.lostT += dt; if (s.lostT > .4){ s.pinched = false; s.on = s.off = 0; s.tgt = null; } continue; }
     s.lostT = 0;
-    if (!s.init){ s.px = h.cx; s.py = h.cy; s.ratio = h.rawRatio; s.init = true; }
-    const sp = Math.hypot(h.cx - s.px, h.cy - s.py), a = Math.min(.9, .3 + sp/60);
-    s.px += (h.cx - s.px)*a; s.py += (h.cy - s.py)*a;
+    if (!s.init){ s.px = h.ax; s.py = h.ay; s.ratio = h.rawRatio; s.init = true; }
+    const sp = Math.hypot(h.ax - s.px, h.ay - s.py), a = Math.min(.9, .3 + sp/60);
+    s.px += (h.ax - s.px)*a; s.py += (h.ay - s.py)*a;
     s.ratio += (h.rawRatio - s.ratio)*.5; h.ratio = s.ratio;
     const ON = h.wl ? .30 : .38, OFF = h.wl ? .50 : .55, was = s.pinched;
     if (!s.pinched){ s.on = s.ratio < ON ? s.on + 1 : 0; if (s.on >= 2){ s.pinched = true; s.on = 0; } }
     else { s.off = s.ratio > OFF ? s.off + 1 : 0; if (s.off >= 2){ s.pinched = false; s.off = 0; } }
-    if (!s.pinched && !s.obj && s.ratio > .55){
-      const n = nearest(s.px, s.py, 100);
-      if (n !== s.hoverObj){ setGlow(s.hoverObj, false); setGlow(n, true); s.hoverObj = n; }
-      s.hover = n;
+    if (!s.pinched && s.ratio > .5){ // while your hand is open, keep track of what you are pointing at
+      const el = document.elementFromPoint(s.px, s.py); s.ui = el && el.closest ? el.closest('button') : null;
+      s.tgt = s.ui ? null : aimTarget(s.px, s.py);
     }
-    if (s.pinched && !was && !s.obj){
-      let t = s.hover ? grab(s.hover) : null;
-      if (!t){ const n = nearest(s.px, s.py, 100); t = n ? grab(n) : null; }
-      s.obj = t; setGlow(s.hoverObj, false); s.hoverObj = null; s.hover = null;
-      if (t) setStatus('');
-    }
-    if (s.obj && s.pinched){
-      const o = s.obj, tg = holdTarget(s.px, s.py);
-      if (tg){
-        const c = tg.cell, ok = lenAt(c[0], c[1]) < 8;
-        o.position.x += ((tg.x + (c[0] - tg.x)*.5) - o.position.x)*.5;
-        o.position.z += ((tg.z + (c[1] - tg.z)*.5) - o.position.z)*.5;
-        o.position.y += (tg.y - o.position.y)*.5;
-        s.cell = ok ? c : null;
-        if (ok){ ghost.visible = true; ghost.position.set(c[0], lenAt(c[0], c[1]) + .5, c[1]); updateDropLine(o.position, ghost.position); }
-        else { ghost.visible = false; dropLine.visible = false; }
-      }
-      o.scale.setScalar(1 + (o.scale.x - 1)*.8);
-    }
-    if (s.obj && !s.pinched) release(s);
+    if (s.pinched && !was){ if (s.ui) s.ui.click(); else if (s.tgt) act(s.tgt, now); }
+    if (!shown && s.tgt) shown = s.tgt;
   }
-  if (!holds[0].obj && !holds[1].obj){ ghost.visible = false; dropLine.visible = false; }
+  if (shown && (mode === 'break' ? shown.hit : shown.place)){
+    const c = mode === 'break' ? shown.hit : shown.place;
+    ghost.material.color.setHex(mode === 'break' ? 0xff6b5a : 0xffb83d);
+    ghost.position.set(c[0], c[1] + .5, c[2]); ghost.visible = true;
+  } else ghost.visible = false;
 }
-function falling(dt, t){
-  loose.forEach(m => { m.rotation.y += dt*.8; m.position.y = m.userData.y0 + Math.sin(t/600 + m.userData.ph)*.18; });
-  stacks.forEach(st => st.forEach(o => {
-    const u = o.userData;
-    if (o.scale.x > 1.001) o.scale.setScalar(1 + (o.scale.x - 1)*Math.max(0, 1 - 10*dt));
-    u.sh.visible = !u.fall && o.position.y < .56;
-    if (!u.fall) return;
-    u.vy -= 25*dt; o.position.y += u.vy*dt;
-    const k = Math.min(1, 14*dt); o.position.x += (u.tx - o.position.x)*k; o.position.z += (u.tz - o.position.z)*k;
-    if (o.position.y <= u.ty){ o.position.set(u.tx, u.ty, u.tz); u.fall = false; o.scale.setScalar(1.12); }
-  }));
-}
-// arrow at the screen edge pointing toward the nearest material when none is on screen
-const _v = new THREE.Vector3();
-function hint(){
-  if (!anchored || !loose.length || holds.some(s => s.obj)) return;
-  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  let best = null, bd = -2;
-  for (const m of loose){
-    m.getWorldPosition(_v);
-    const p = _v.clone().project(camera); if (p.z < 1 && Math.abs(p.x) < .92 && Math.abs(p.y) < .92) return;
-    const d = _v.clone().normalize().dot(fwd); if (d > bd){ bd = d; best = _v.clone(); }
+
+// ---- auto-build: a small house, placed block by block ----
+function houseBlueprint(ci, k0, cj){
+  const out = [];
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) out.push([ci + x, k0, cj + z, 0]);
+  for (let h = 1; h <= 3; h++) for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++){
+    if (Math.abs(x) !== 2 && Math.abs(z) !== 2) continue;
+    if (z === 2 && x === 0 && h <= 2) continue;
+    const corner = Math.abs(x) === 2 && Math.abs(z) === 2;
+    let t = corner ? 1 : 0;
+    if (h === 2 && ((Math.abs(x) === 2 && z === 0) || (z === -2 && x === 0))) t = 3;
+    out.push([ci + x, k0 + h, cj + z, t]);
   }
-  if (!best) return;
-  best.applyMatrix4(camera.matrixWorldInverse);
-  let dx = best.x, dy = -best.y; const m = Math.hypot(dx, dy) || 1; dx /= m; dy /= m;
-  const t = Math.min((W/2 - 36)/(Math.abs(dx) || 1e-3), (H/2 - 130)/(Math.abs(dy) || 1e-3));
-  octx.save(); octx.translate(W/2 + dx*t, H/2 + dy*t); octx.rotate(Math.atan2(dy, dx));
-  octx.fillStyle = '#ffb83d'; octx.beginPath(); octx.moveTo(20, 0); octx.lineTo(-12, -15); octx.lineTo(-12, 15); octx.closePath(); octx.fill(); octx.restore();
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) out.push([ci + x, k0 + 4, cj + z, 2]);
+  for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) out.push([ci + x, k0 + 5, cj + z, 2]);
+  out.push([ci, k0 + 6, cj, 2]);
+  return out;
+}
+$('house').addEventListener('click', () => {
+  if (!anchored) return;
+  const t = holds.map(s => s.tgt).find(g => g && g.place), c = t ? t.place : lastPlace;
+  queue.push(...houseBlueprint(c[0], c[1], c[2])); lastPlace = c; setStatus('');
+});
+
+function animate(dt, now){
+  for (let n = popping.length - 1; n >= 0; n--){
+    const m = popping[n]; m.scale.setScalar(m.scale.x + (1 - m.scale.x)*Math.min(1, 18*dt));
+    if (m.scale.x > .995){ m.scale.setScalar(1); popping.splice(n, 1); }
+  }
+  if (queue.length && now - lastBuild > 40){ const q = queue.shift(); addBlock(q[0], q[1], q[2], q[3], true); lastBuild = now; }
 }
 function drawHands(){
   octx.clearRect(0, 0, W, H);
   const bones = [[0,1,2,3,4],[0,5,6,7,8],[9,10,11,12],[13,14,15,16],[0,17,18,19,20],[5,9,13,17]];
   hands.forEach((h, i) => {
     const s = holds[i];
-    octx.strokeStyle = 'rgba(244,239,230,.7)'; octx.lineWidth = 3;
+    octx.strokeStyle = 'rgba(244,239,230,.6)'; octx.lineWidth = 3;
     bones.forEach(ch => { octx.beginPath(); ch.forEach((k, j) => j ? octx.lineTo(h.p[k].x, h.p[k].y) : octx.moveTo(h.p[k].x, h.p[k].y)); octx.stroke(); });
-    const cx = s.init ? s.px : h.cx, cy = s.init ? s.py : h.cy;
-    if (s.pinched){ octx.fillStyle = '#ffb83d'; octx.beginPath(); octx.arc(cx, cy, 13, 0, 7); octx.fill(); }
-    else { octx.strokeStyle = '#2fd3c0'; octx.lineWidth = 4; octx.beginPath(); octx.arc(cx, cy, 9 + 16*Math.min(1, s.ratio), 0, 7); octx.stroke(); }
+    const cx = s.init ? s.px : h.ax, cy = s.init ? s.py : h.ay;
+    octx.strokeStyle = s.pinched ? '#ffb83d' : '#2fd3c0'; octx.lineWidth = 3;
+    octx.beginPath(); octx.moveTo(cx - 16, cy); octx.lineTo(cx + 16, cy); octx.moveTo(cx, cy - 16); octx.lineTo(cx, cy + 16); octx.stroke();
+    octx.beginPath(); octx.arc(cx, cy, 8 + 14*Math.min(1, s.ratio), 0, 7); octx.stroke();
   });
   if (!anchored && hands[0] && progress > 0){
     const c = hands[0].p[9]; octx.strokeStyle = '#ffb83d'; octx.lineWidth = 6;
     octx.beginPath(); octx.arc(c.x, c.y, 40, -Math.PI/2, -Math.PI/2 + progress*Math.PI*2); octx.stroke();
   }
-  hint();
 }
 function frame(t){
   const dt = Math.min((t - last)/1000, .05); last = t;
   updateOrientation(); calibrate(dt);
-  if (anchored){ handLogic(dt); falling(dt, t); }
+  if (startedAt && !warned && !ori.ok && !absOri.ok && t - startedAt > 2500){ warned = true; $('warn').textContent = 'Your phone\u2019s motion sensors are not reaching this page, so blocks stay stuck to the screen. In Chrome tap the lock icon next to the address, open Permissions, allow Motion sensors, then reload. Or use AR mode.'; $('warn').hidden = false; }
+  if (warned && (ori.ok || absOri.ok)) $('warn').hidden = true;
+  if (anchored){ handLogic(dt, t); animate(dt, t); }
   renderer.render(scene, camera); drawHands();
   if (video.readyState >= 2 && !sending && window.handsModel){
     sending = true; handsModel.send({ image: video }).catch(() => {}).finally(() => { sending = false; });
@@ -333,14 +315,8 @@ function frame(t){
   requestAnimationFrame(frame);
 }
 
-function reanchor(){
-  holds.forEach(s => { if (s.obj) release(s); });
-  anchored = false; board.visible = false; holdT = 0; holdRef = null; progress = 0;
-  setStatus('Rest your open hand flat on the table and hold still');
-}
-$('recal').addEventListener('click', reanchor);
-$('more').addEventListener('click', () => { if (anchored) scatter(6); });
-$('clear').addEventListener('click', () => { stacks.forEach(st => st.forEach(o => board.remove(o))); stacks.clear(); count(); });
+$('recal').addEventListener('click', () => { anchored = false; board.visible = false; ghost.visible = false; holdT = 0; holdRef = null; progress = 0; setStatus('Rest your open hand flat on the table and hold still'); });
+$('clear').addEventListener('click', () => { blocks.forEach(m => board.remove(m)); blocks.clear(); queue.length = 0; popping.length = 0; count(); });
 $('start').addEventListener('click', async () => {
   const msg = $('msg'); msg.textContent = 'Starting camera\u2026';
   try {
@@ -355,7 +331,8 @@ $('start').addEventListener('click', async () => {
       msg.textContent = 'Loading hand tracking\u2026';
       await m.initialize(); window.handsModel = m;
     }
-    msg.textContent = ''; $('panel').hidden = true; $('bar').hidden = false; count();
+    startedAt = performance.now();
+    msg.textContent = ''; $('panel').hidden = true; $('bar').hidden = false; $('hotbar').hidden = false; count();
     setStatus('Rest your open hand flat on the table and hold still');
   } catch (e) {
     msg.textContent = 'Camera or hand tracking could not start. Open this page over https and allow camera access.';

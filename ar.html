@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Table Craft AR</title>
+<style>
+  :root { --ink:#f4efe6; --night:#10151c; --teal:#2fd3c0; --amber:#ffb83d; }
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  html,body { margin:0; height:100%; background:var(--night); color:var(--ink); font-family:"Trebuchet MS",system-ui,sans-serif; overflow:hidden; }
+  #ui { position:fixed; inset:0; z-index:5; pointer-events:none; }
+  #ui > * { pointer-events:auto; }
+  #bar { position:absolute; top:env(safe-area-inset-top,0px); left:0; right:0; display:flex; justify-content:space-between; align-items:center; padding:12px; gap:6px; font-weight:700; font-size:13px; text-shadow:0 2px 6px rgba(0,0,0,.7); }
+  .grp { display:flex; gap:6px; }
+  button { font:inherit; font-weight:700; font-size:16px; padding:12px 24px; border:0; border-radius:14px; background:var(--teal); color:#06231f; }
+  #bar button { font-size:13px; padding:9px 11px; background:rgba(244,239,230,.92); color:var(--night); }
+  button:focus-visible { outline:3px solid var(--amber); outline-offset:3px; }
+  #hotbar { position:absolute; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 14px); display:flex; justify-content:center; gap:8px; padding:0 10px; }
+  .slot { width:52px; height:52px; padding:0; border:3px solid rgba(255,255,255,.55); border-radius:10px; background-size:cover; image-rendering:pixelated; color:#fff; font-size:12px; text-shadow:0 1px 3px #000; }
+  .slot.on { border-color:var(--amber); transform:scale(1.14); }
+  .slot.brk { background:#5b1f1a; border-color:rgba(255,107,90,.8); }
+  #status { position:absolute; top:calc(env(safe-area-inset-top,0px) + 64px); left:50%; transform:translateX(-50%); padding:9px 16px; border-radius:12px; background:rgba(16,21,28,.82); font-size:15px; text-align:center; width:max-content; max-width:90vw; pointer-events:none; }
+  #cross { position:absolute; left:50%; top:50%; width:26px; height:26px; margin:-13px 0 0 -13px; border:3px solid rgba(255,255,255,.9); border-radius:50%; pointer-events:none; }
+  #panel { position:fixed; inset:0; z-index:6; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center; background:rgba(16,21,28,.92); }
+  #panel h1 { margin:0; font-size:40px; letter-spacing:-.5px; }
+  #panel p { margin:0; max-width:34ch; line-height:1.5; opacity:.92; }
+  #msg { min-height:1.2em; color:var(--amber); font-size:14px; max-width:34ch; }
+  a { color:var(--amber); font-weight:700; }
+</style>
+</head>
+<body>
+<div id="ui" hidden>
+  <div id="bar"><button id="clear">Clear</button><span id="count"></span><span class="grp"><button id="house">House</button><button id="move">Move base</button><button id="exit">Exit</button></span></div>
+  <div id="status"></div>
+  <div id="cross" hidden></div>
+  <div id="hotbar"></div>
+</div>
+<div id="panel">
+  <h1>Table Craft AR</h1>
+  <p>Real AR: your phone finds the table and the blocks stay put on it, even when you walk around. Move the phone slowly to scan the table, tap when the ring shows, then aim the circle and tap to place blocks. Uses touch, not your hand.</p>
+  <button id="start">Start AR</button>
+  <div id="msg"></div>
+  <p><a href="index.html">Hand mode</a></p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const SIZE = 0.05; // one block = 5 cm
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2)); renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
+renderer.domElement.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;z-index:0';
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, .01, 30);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x999999, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, .7); sun.position.set(1, 3, 2); scene.add(sun);
+
+// pixel-art textures
+function tex(draw){
+  const c = document.createElement('canvas'); c.width = c.height = 16; const g = c.getContext('2d'); draw(g);
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.userData = { url: c.toDataURL() }; return t;
+}
+function speckle(g, base, vars, n){ g.fillStyle = base; g.fillRect(0, 0, 16, 16); for (let i = 0; i < n; i++){ g.fillStyle = vars[(Math.random()*vars.length)|0]; g.fillRect((Math.random()*16)|0, (Math.random()*16)|0, 1, 1); } }
+const tPlanks = tex(g => { speckle(g, '#b8854a', ['#a8763e', '#c8955a'], 60); g.fillStyle = '#8a5d2b'; [0, 4, 8, 12].forEach(y => g.fillRect(0, y + 3, 16, 1)); g.fillRect(5, 0, 1, 3); g.fillRect(11, 4, 1, 3); g.fillRect(3, 8, 1, 3); g.fillRect(9, 12, 1, 3); });
+const tStone = tex(g => speckle(g, '#8e9297', ['#7d8186', '#9fa3a8', '#6f7378'], 90));
+const tBrick = tex(g => { g.fillStyle = '#a24a3b'; g.fillRect(0, 0, 16, 16); g.fillStyle = '#cfc6bb'; [0, 4, 8, 12].forEach((y, r) => { g.fillRect(0, y, 16, 1); const o = r % 2 ? 0 : 4; g.fillRect(o, y, 1, 4); g.fillRect(o + 8, y, 1, 4); }); });
+const tGlass = tex(g => { g.fillStyle = 'rgba(190,230,255,.35)'; g.fillRect(0, 0, 16, 16); g.fillStyle = '#e8f6ff'; g.fillRect(0, 0, 16, 1); g.fillRect(0, 15, 16, 1); g.fillRect(0, 0, 1, 16); g.fillRect(15, 0, 1, 16); g.fillRect(3, 3, 2, 1); g.fillRect(3, 4, 1, 2); });
+const tGrassTop = tex(g => speckle(g, '#5fa043', ['#4f8f36', '#72b552', '#4a8532'], 80));
+const tDirt = tex(g => speckle(g, '#7a5230', ['#6a4528', '#8a5f3a', '#5c3b22'], 80));
+const tGrassSide = tex(g => { speckle(g, '#7a5230', ['#6a4528', '#8a5f3a', '#5c3b22'], 70); g.fillStyle = '#5fa043'; g.fillRect(0, 0, 16, 4); g.fillStyle = '#4f8f36'; for (let x = 0; x < 16; x += 2) g.fillRect(x, 4, 1, 1 + ((x*7)%3 ? 1 : 0)); });
+const lam = t => new THREE.MeshLambertMaterial({ map: t });
+const MATS = [ lam(tPlanks), lam(tStone), lam(tBrick), new THREE.MeshLambertMaterial({ map: tGlass, transparent: true, depthWrite: false }), [lam(tGrassSide), lam(tGrassSide), lam(tGrassTop), lam(tDirt), lam(tGrassSide), lam(tGrassSide)] ];
+const NAMES = ['Planks', 'Stone', 'Brick', 'Glass', 'Grass'], ICONS = [tPlanks, tStone, tBrick, tGlass, tGrassTop].map(t => t.userData.url);
+
+// the world is fixed to your real table once you tap; blocks are cells (i,k,j) inside it
+const world = new THREE.Group(); world.visible = false; world.scale.setScalar(SIZE); scene.add(world);
+const reticle = new THREE.Mesh(new THREE.RingGeometry(.07, .09, 32).rotateX(-Math.PI/2), new THREE.MeshBasicMaterial({ color: 0xffb83d }));
+reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
+const boxGeo = new THREE.BoxGeometry(1, 1, 1), shGeo = new THREE.CircleGeometry(.72, 20), shMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .3, depthWrite: false });
+const blocks = new Map(), popping = [], queue = [];
+let sel = 0, mode = 'place', lastPlace = [0, 0, 0], lastBuild = 0, anchored = false, tgt = null, session = null, hitSource = null;
+const key = (i, k, j) => i + ',' + k + ',' + j;
+const count = () => { $('count').textContent = 'Blocks ' + blocks.size; };
+const setStatus = t => { const e = $('status'); e.textContent = t; e.hidden = !t; };
+function addBlock(i, k, j, t, pop){
+  const kk = key(i, k, j); if (blocks.has(kk) || k < 0 || k > 16) return;
+  const m = new THREE.Mesh(boxGeo, MATS[t]); m.position.set(i, k + .5, j);
+  if (k === 0){ const sh = new THREE.Mesh(shGeo, shMat); sh.rotation.x = -Math.PI/2; sh.position.y = -.495; m.add(sh); }
+  if (pop){ m.scale.setScalar(.5); popping.push(m); }
+  world.add(m); blocks.set(kk, m); count();
+}
+function removeBlock(c){ const kk = key(c[0], c[1], c[2]), m = blocks.get(kk); if (!m) return; world.remove(m); blocks.delete(kk); count(); }
+const ghost = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.03, 1.03, 1.03)), new THREE.LineBasicMaterial({ color: 0xffb83d }));
+ghost.visible = false; world.add(ghost);
+
+// voxel ray walk: first solid block along the ray, plus the empty cell just before it
+function traverse(o, d, has){
+  const px = o.x + .5, py = o.y, pz = o.z + .5;
+  let i = Math.floor(px), k = Math.floor(py), j = Math.floor(pz);
+  const sx = Math.sign(d.x), sy = Math.sign(d.y), sz = Math.sign(d.z);
+  const dx = sx ? Math.abs(1/d.x) : 1e9, dy = sy ? Math.abs(1/d.y) : 1e9, dz = sz ? Math.abs(1/d.z) : 1e9;
+  let tx = sx ? (sx > 0 ? i + 1 - px : px - i)*dx : 1e9, ty = sy ? (sy > 0 ? k + 1 - py : py - k)*dy : 1e9, tz = sz ? (sz > 0 ? j + 1 - pz : pz - j)*dz : 1e9;
+  let prev = null;
+  for (let n = 0; n < 200; n++){
+    if (k < 0) return prev ? { place: prev, hit: null } : null;
+    if (has(i, k, j)) return { place: prev, hit: [i, k, j] };
+    prev = [i, k, j];
+    if (tx < ty && tx < tz){ i += sx; tx += dx; } else if (ty < tz){ k += sy; ty += dy; } else { j += sz; tz += dz; }
+  }
+  return null;
+}
+
+// hotbar
+const bar = $('hotbar');
+ICONS.forEach((u, n) => { const b = document.createElement('button'); b.className = 'slot'; b.style.backgroundImage = 'url(' + u + ')'; b.setAttribute('aria-label', NAMES[n]); b.addEventListener('click', () => choose(n)); bar.appendChild(b); });
+{ const b = document.createElement('button'); b.className = 'slot brk'; b.textContent = 'Break'; b.addEventListener('click', () => choose(5)); bar.appendChild(b); }
+function choose(n){ if (n === 5) mode = 'break'; else { mode = 'place'; sel = n; } [...bar.children].forEach((b, i) => b.classList.toggle('on', mode === 'break' ? i === 5 : i === sel)); }
+choose(0);
+['bar', 'hotbar'].forEach(id => $(id).addEventListener('beforexrselect', e => e.preventDefault()));
+
+function houseBlueprint(ci, k0, cj){
+  const out = [];
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) out.push([ci + x, k0, cj + z, 0]);
+  for (let h = 1; h <= 3; h++) for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++){
+    if (Math.abs(x) !== 2 && Math.abs(z) !== 2) continue;
+    if (z === 2 && x === 0 && h <= 2) continue;
+    let t = (Math.abs(x) === 2 && Math.abs(z) === 2) ? 1 : 0;
+    if (h === 2 && ((Math.abs(x) === 2 && z === 0) || (z === -2 && x === 0))) t = 3;
+    out.push([ci + x, k0 + h, cj + z, t]);
+  }
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) out.push([ci + x, k0 + 4, cj + z, 2]);
+  for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) out.push([ci + x, k0 + 5, cj + z, 2]);
+  out.push([ci, k0 + 6, cj, 2]);
+  return out;
+}
+$('house').addEventListener('click', () => { if (!anchored) return; const c = tgt && tgt.place ? tgt.place : lastPlace; queue.push(...houseBlueprint(c[0], c[1], c[2])); lastPlace = c; setStatus(''); });
+$('clear').addEventListener('click', () => { blocks.forEach(m => world.remove(m)); blocks.clear(); queue.length = 0; popping.length = 0; count(); });
+$('move').addEventListener('click', () => { anchored = false; ghost.visible = false; $('cross').hidden = true; setStatus('Aim the ring at the table and tap to move the base here'); });
+$('exit').addEventListener('click', () => { if (session) session.end(); });
+
+const cp = new THREE.Vector3(), cd = new THREE.Vector3(), q = new THREE.Quaternion();
+function aim(vp){
+  tgt = null;
+  if (vp){
+    const t = vp.transform; cp.set(t.position.x, t.position.y, t.position.z); q.set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w); cd.set(0, 0, -1).applyQuaternion(q);
+    const inv = world.matrixWorld.clone().invert(), o = cp.clone().applyMatrix4(inv), d = cd.clone().transformDirection(inv);
+    const r = traverse(o, d, (i, k, j) => blocks.has(key(i, k, j)));
+    if (r && !(r.place && (Math.abs(r.place[0]) > 40 || Math.abs(r.place[2]) > 40))) tgt = r;
+  }
+  const c = tgt && (mode === 'break' ? tgt.hit : tgt.place);
+  if (c){ ghost.material.color.setHex(mode === 'break' ? 0xff6b5a : 0xffb83d); ghost.position.set(c[0], c[1] + .5, c[2]); ghost.visible = true; } else ghost.visible = false;
+}
+function onSelect(){
+  if (!anchored){
+    if (!reticle.visible) return;
+    world.position.setFromMatrixPosition(reticle.matrix);
+    if (lastCam) world.rotation.y = Math.atan2(lastCam.x - world.position.x, lastCam.z - world.position.z);
+    world.visible = true; world.updateMatrixWorld(true); anchored = true; $('cross').hidden = false;
+    setStatus('Aim the circle and tap to place a block. Pick Break to remove blocks.'); return;
+  }
+  if (!tgt) return;
+  if (mode === 'break'){ if (tgt.hit) removeBlock(tgt.hit); }
+  else if (tgt.place){ addBlock(tgt.place[0], tgt.place[1], tgt.place[2], sel, true); lastPlace = tgt.place; }
+  setStatus('');
+}
+let lastCam = null;
+function render(t, frame){
+  if (frame){
+    const ref = renderer.xr.getReferenceSpace(), vp = frame.getViewerPose(ref);
+    if (vp){ const p = vp.transform.position; lastCam = { x: p.x, y: p.y, z: p.z }; }
+    if (!anchored && hitSource){
+      const r = frame.getHitTestResults(hitSource), pose = r.length ? r[0].getPose(ref) : null;
+      if (pose){ reticle.visible = true; reticle.matrix.fromArray(pose.transform.matrix); } else reticle.visible = false;
+    } else reticle.visible = false;
+    if (anchored) aim(vp);
+  }
+  const dt = 1/60;
+  for (let n = popping.length - 1; n >= 0; n--){ const m = popping[n]; m.scale.setScalar(m.scale.x + (1 - m.scale.x)*Math.min(1, 18*dt)); if (m.scale.x > .995){ m.scale.setScalar(1); popping.splice(n, 1); } }
+  if (queue.length && t - lastBuild > 40){ const b = queue.shift(); addBlock(b[0], b[1], b[2], b[3], true); lastBuild = t; }
+  renderer.render(scene, camera);
+}
+function onEnd(){
+  renderer.setAnimationLoop(null); session = null; hitSource = null; anchored = false; tgt = null;
+  blocks.forEach(m => world.remove(m)); blocks.clear(); queue.length = 0; popping.length = 0; world.visible = false; ghost.visible = false;
+  $('ui').hidden = true; $('panel').hidden = false; $('msg').textContent = '';
+}
+$('start').addEventListener('click', async () => {
+  const msg = $('msg');
+  const ok = navigator.xr ? await navigator.xr.isSessionSupported('immersive-ar').catch(() => false) : false;
+  if (!ok){ msg.textContent = 'AR is not available here. It needs Chrome on an ARCore phone with Google Play Services for AR installed. Hand mode still works.'; return; }
+  try {
+    $('ui').hidden = false; count();
+    session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hit-test'], optionalFeatures: ['dom-overlay'], domOverlay: { root: $('ui') } });
+    session.addEventListener('end', onEnd);
+    const controller = renderer.xr.getController(0); controller.addEventListener('select', onSelect); scene.add(controller);
+    await renderer.xr.setSession(session);
+    const viewer = await session.requestReferenceSpace('viewer'); hitSource = await session.requestHitTestSource({ space: viewer });
+    $('panel').hidden = true; setStatus('Move your phone slowly over the table. When the ring appears, tap to start building there.');
+    renderer.setAnimationLoop(render);
+  } catch (e){ $('ui').hidden = true; msg.textContent = 'Could not start AR: ' + ((e && e.message) || e); }
+});
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); });
+</script>
+</body>
+</html>
