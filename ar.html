@@ -154,8 +154,9 @@ function aim(vp){
 }
 function onSelect(){
   if (!anchored){
-    if (!reticle.visible) return;
-    world.position.setFromMatrixPosition(reticle.matrix);
+    if (reticle.visible) world.position.setFromMatrixPosition(reticle.matrix);
+    else if (!hitSource && lastCam && lastFwd) world.position.set(lastCam.x + lastFwd.x*.45, lastCam.y - .4, lastCam.z + lastFwd.z*.45);
+    else return;
     if (lastCam) world.rotation.y = Math.atan2(lastCam.x - world.position.x, lastCam.z - world.position.z);
     world.visible = true; world.updateMatrixWorld(true); anchored = true; $('cross').hidden = false;
     setStatus('Aim the circle and tap to place a block. Pick Break to remove blocks.'); return;
@@ -165,11 +166,11 @@ function onSelect(){
   else if (tgt.place){ addBlock(tgt.place[0], tgt.place[1], tgt.place[2], sel, true); lastPlace = tgt.place; }
   setStatus('');
 }
-let lastCam = null;
+let lastCam = null, lastFwd = null;
 function render(t, frame){
   if (frame){
     const ref = renderer.xr.getReferenceSpace(), vp = frame.getViewerPose(ref);
-    if (vp){ const p = vp.transform.position; lastCam = { x: p.x, y: p.y, z: p.z }; }
+    if (vp){ const p = vp.transform.position, o = vp.transform.orientation; lastCam = { x: p.x, y: p.y, z: p.z }; const f = new THREE.Vector3(0, 0, -1).applyQuaternion(new THREE.Quaternion(o.x, o.y, o.z, o.w)), l = Math.hypot(f.x, f.z) || 1; lastFwd = { x: f.x/l, z: f.z/l }; }
     if (!anchored && hitSource){
       const r = frame.getHitTestResults(hitSource), pose = r.length ? r[0].getPose(ref) : null;
       if (pose){ reticle.visible = true; reticle.matrix.fromArray(pose.transform.matrix); } else reticle.visible = false;
@@ -192,12 +193,16 @@ $('start').addEventListener('click', async () => {
   if (!ok){ msg.textContent = 'AR is not available here. It needs Chrome on an ARCore phone with Google Play Services for AR installed. Hand mode still works.'; return; }
   try {
     $('ui').hidden = false; count();
-    session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hit-test'], optionalFeatures: ['dom-overlay'], domOverlay: { root: $('ui') } });
+    const tries = [{ optionalFeatures: ['hit-test', 'dom-overlay'], domOverlay: { root: $('ui') } }, { optionalFeatures: ['hit-test'] }, {}];
+    let lastErr = null; session = null;
+    for (const init of tries){ try { session = await navigator.xr.requestSession('immersive-ar', init); break; } catch (e){ lastErr = e; } }
+    if (!session) throw lastErr;
     session.addEventListener('end', onEnd);
     const controller = renderer.xr.getController(0); controller.addEventListener('select', onSelect); scene.add(controller);
     await renderer.xr.setSession(session);
-    const viewer = await session.requestReferenceSpace('viewer'); hitSource = await session.requestHitTestSource({ space: viewer });
-    $('panel').hidden = true; setStatus('Move your phone slowly over the table. When the ring appears, tap to start building there.');
+    try { const viewer = await session.requestReferenceSpace('viewer'); hitSource = await session.requestHitTestSource({ space: viewer }); } catch (e){ hitSource = null; }
+    $('panel').hidden = true;
+    setStatus(hitSource ? 'Move your phone slowly over the table. When the ring appears, tap to start building there.' : 'Hold the phone about 40 cm above the table, pointing at it, then tap to start building.');
     renderer.setAnimationLoop(render);
   } catch (e){ $('ui').hidden = true; msg.textContent = 'Could not start AR: ' + ((e && e.message) || e); }
 });

@@ -22,8 +22,7 @@
   .slot { width:52px; height:52px; padding:0; border:3px solid rgba(255,255,255,.55); border-radius:10px; background-size:cover; image-rendering:pixelated; color:#fff; font-size:12px; text-shadow:0 1px 3px #000; }
   .slot.on { border-color:var(--amber); transform:scale(1.14); }
   .slot.brk { background:#5b1f1a; border-color:rgba(255,107,90,.8); }
-  #status { position:fixed; top:calc(env(safe-area-inset-top,0px) + 64px); left:50%; transform:translateX(-50%); z-index:5; padding:9px 16px; border-radius:12px; background:rgba(16,21,28,.82); font-size:15px; text-align:center; max-width:90vw; }
-  #warn { position:fixed; top:calc(env(safe-area-inset-top,0px) + 120px); left:50%; transform:translateX(-50%); z-index:5; padding:10px 14px; border-radius:12px; background:rgba(91,31,26,.92); border:2px solid var(--red); font-size:14px; line-height:1.4; text-align:center; width:min(92vw,420px); }
+  #status { position:fixed; top:calc(env(safe-area-inset-top,0px) + 64px); left:50%; transform:translateX(-50%); z-index:5; padding:9px 16px; border-radius:12px; background:rgba(16,21,28,.82); font-size:15px; text-align:center; width:max-content; max-width:90vw; }
   a { color:var(--amber); font-weight:700; }
   #panel { position:fixed; inset:0; z-index:6; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center; background:rgba(16,21,28,.88); }
   #panel h1 { margin:0; font-size:42px; letter-spacing:-.5px; }
@@ -37,27 +36,231 @@
 <canvas id="gl"></canvas>
 <canvas id="ov"></canvas>
 <div id="status" hidden></div>
-<div id="warn" hidden></div>
 <div id="bar" hidden><button id="clear">Clear</button><span id="count"></span><span class="grp"><button id="house">House</button><button id="recal">Re-anchor</button></span></div>
 <div id="hotbar" hidden></div>
 <div id="panel">
   <h1>Table Craft</h1>
-  <p>Prop your phone up so the back camera sees your table. Rest your open hand flat on the table and hold still for a second. Then point with your index finger to aim, and pinch to place the selected block. Pick Break to remove blocks, or tap House to auto-build one.</p>
+  <p>Prop your phone up so the back camera sees your table. Rest your open hand flat on the table and hold still for a second. The camera then locks onto the table surface, so blocks stay put when you move the phone. Point with your index finger to aim, and pinch to place a block. Works best on a table with some texture, like wood grain or cloth.</p>
   <button id="start">Start camera</button>
   <div id="msg"></div>
-  <p>Want blocks that stay put even when you walk around the table? Try <a href="ar.html">AR mode</a> (touch controls).</p>
+  <p>Phone supports Google AR? Try <a href="ar.html">AR mode</a> (touch controls).</p>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
 <script>
+// ===== table tracking: follows the table surface in the camera image =====
+function mul3(A, B){ const C = [[0,0,0],[0,0,0],[0,0,0]]; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) C[i][j] = A[i][0]*B[0][j] + A[i][1]*B[1][j] + A[i][2]*B[2][j]; return C; }
+function inv3(m){
+  const a = m[0][0], b = m[0][1], c = m[0][2], d = m[1][0], e = m[1][1], f = m[1][2], g = m[2][0], h = m[2][1], i = m[2][2];
+  const A = e*i - f*h, B = -(d*i - f*g), C = d*h - e*g, det = a*A + b*B + c*C;
+  if (Math.abs(det) < 1e-14) return null;
+  return [[A/det, -(b*i - c*h)/det, (b*f - c*e)/det], [B/det, (a*i - c*g)/det, -(a*f - c*d)/det], [C/det, -(a*h - b*g)/det, (a*e - b*d)/det]];
+}
+function applyH(H, x, y){ const w = H[2][0]*x + H[2][1]*y + H[2][2]; return [(H[0][0]*x + H[0][1]*y + H[0][2])/w, (H[1][0]*x + H[1][1]*y + H[1][2])/w, w]; }
+function solveLinear(A, b){
+  const n = b.length;
+  for (let i = 0; i < n; i++){
+    let p = i; for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+    if (Math.abs(A[p][i]) < 1e-12) return null;
+    [A[i], A[p]] = [A[p], A[i]]; [b[i], b[p]] = [b[p], b[i]];
+    for (let r = i + 1; r < n; r++){ const k = A[r][i]/A[i][i]; for (let c = i; c < n; c++) A[r][c] -= k*A[i][c]; b[r] -= k*b[i]; }
+  }
+  const x = new Array(n); for (let i = n - 1; i >= 0; i--){ let s = b[i]; for (let c = i + 1; c < n; c++) s -= A[i][c]*x[c]; x[i] = s/A[i][i]; }
+  return x;
+}
+function normPts(P){
+  let mx = 0, my = 0; P.forEach(p => { mx += p[0]; my += p[1]; }); mx /= P.length; my /= P.length;
+  let d = 0; P.forEach(p => d += Math.hypot(p[0] - mx, p[1] - my)); d /= P.length;
+  const s = d > 1e-9 ? Math.SQRT2/d : 1;
+  return { T: [[s, 0, -s*mx], [0, s, -s*my], [0, 0, 1]], Q: P.map(p => [(p[0] - mx)*s, (p[1] - my)*s]) };
+}
+// homography src -> dst from 4 or more points (least squares, normalised)
+function fitH(src, dst){
+  const a = normPts(src), b = normPts(dst), M = Array.from({ length: 8 }, () => new Array(8).fill(0)), v = new Array(8).fill(0);
+  for (let i = 0; i < src.length; i++){
+    const X = a.Q[i][0], Y = a.Q[i][1], u = b.Q[i][0], w = b.Q[i][1];
+    const r1 = [X, Y, 1, 0, 0, 0, -u*X, -u*Y], r2 = [0, 0, 0, X, Y, 1, -w*X, -w*Y];
+    for (let p = 0; p < 8; p++){ for (let q = 0; q < 8; q++) M[p][q] += r1[p]*r1[q] + r2[p]*r2[q]; v[p] += r1[p]*u + r2[p]*w; }
+  }
+  const h = solveLinear(M, v); if (!h) return null;
+  const Hn = [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1]], bi = inv3(b.T); if (!bi) return null;
+  const H = mul3(mul3(bi, Hn), a.T); if (Math.abs(H[2][2]) < 1e-12) return null;
+  const s = H[2][2]; return H.map(r => r.map(x => x/s));
+}
+function spread4(P){
+  for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) if (Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1]) < 6) return false;
+  for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) for (let k = j + 1; k < 4; k++){
+    const ar = Math.abs((P[j][0] - P[i][0])*(P[k][1] - P[i][1]) - (P[k][0] - P[i][0])*(P[j][1] - P[i][1]));
+    if (ar < 40) return false;
+  }
+  return true;
+}
+function ransacH(a, b, thr, iters){
+  const n = a.length; if (n < 8) return null;
+  let best = null, bestCnt = 0, bestMask = null; const idx = [0, 0, 0, 0];
+  for (let it = 0; it < iters; it++){
+    for (let k = 0; k < 4; k++){ let r; do { r = (Math.random()*n)|0; } while (idx.slice(0, k).includes(r)); idx[k] = r; }
+    const sa = idx.map(i => a[i]), sb = idx.map(i => b[i]);
+    if (!spread4(sa)) continue;
+    const H = fitH(sa, sb); if (!H) continue;
+    let cnt = 0; const mask = new Array(n);
+    for (let i = 0; i < n; i++){ const p = applyH(H, a[i][0], a[i][1]); mask[i] = Math.hypot(p[0] - b[i][0], p[1] - b[i][1]) < thr; if (mask[i]) cnt++; }
+    if (cnt > bestCnt){ bestCnt = cnt; best = H; bestMask = mask; if (cnt > 0.92*n) break; }
+  }
+  if (!best || bestCnt < 8) return null;
+  for (let r = 0; r < 2; r++){
+    const sa = [], sb = []; bestMask.forEach((m, i) => { if (m){ sa.push(a[i]); sb.push(b[i]); } });
+    const H = fitH(sa, sb); if (!H) break; best = H;
+    let cnt = 0; for (let i = 0; i < n; i++){ const p = applyH(H, a[i][0], a[i][1]); bestMask[i] = Math.hypot(p[0] - b[i][0], p[1] - b[i][1]) < thr; if (bestMask[i]) cnt++; }
+    bestCnt = cnt;
+  }
+  return { H: best, mask: bestMask, count: bestCnt };
+}
+// image pyramid (Float32), bilinear sampling, pyramidal Lucas-Kanade
+function buildPyr(g, w, h, levels){
+  const P = [{ d: g, w, h }];
+  for (let l = 1; l < levels; l++){
+    const p = P[l - 1], nw = p.w >> 1, nh = p.h >> 1, d = new Float32Array(nw*nh);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++){ const i = 2*y*p.w + 2*x; d[y*nw + x] = (p.d[i] + p.d[i + 1] + p.d[i + p.w] + p.d[i + p.w + 1])*.25; }
+    P.push({ d, w: nw, h: nh });
+  }
+  return P;
+}
+function samp(L, x, y){
+  if (x < 0) x = 0; else if (x > L.w - 1.001) x = L.w - 1.001;
+  if (y < 0) y = 0; else if (y > L.h - 1.001) y = L.h - 1.001;
+  const x0 = x|0, y0 = y|0, fx = x - x0, fy = y - y0, i = y0*L.w + x0, d = L.d;
+  return d[i]*(1 - fx)*(1 - fy) + d[i + 1]*fx*(1 - fy) + d[i + L.w]*(1 - fx)*fy + d[i + L.w + 1]*fx*fy;
+}
+const LK_T = new Float32Array(169), LK_X = new Float32Array(169), LK_Y = new Float32Array(169);
+function lkTrack(Pp, Pc, x, y){
+  let gx = 0, gy = 0;
+  for (let l = Pp.length - 1; l >= 0; l--){
+    const A = Pp[l], B = Pc[l], s = 1 << l, px = x/s, py = y/s, win = l === 0 ? 4 : 3;
+    if (px < win + 2 || py < win + 2 || px > A.w - win - 3 || py > A.h - win - 3){ if (l === 0) return null; gx *= 2; gy *= 2; continue; }
+    let gxx = 0, gxy = 0, gyy = 0, k = 0;
+    for (let dy = -win; dy <= win; dy++) for (let dx = -win; dx <= win; dx++, k++){
+      const tx = px + dx, ty = py + dy;
+      LK_T[k] = samp(A, tx, ty); LK_X[k] = (samp(A, tx + 1, ty) - samp(A, tx - 1, ty))*.5; LK_Y[k] = (samp(A, tx, ty + 1) - samp(A, tx, ty - 1))*.5;
+      gxx += LK_X[k]*LK_X[k]; gxy += LK_X[k]*LK_Y[k]; gyy += LK_Y[k]*LK_Y[k];
+    }
+    const n = k, det = gxx*gyy - gxy*gxy, tr = gxx + gyy, minEig = (tr - Math.sqrt(Math.max(0, (gxx - gyy)*(gxx - gyy) + 4*gxy*gxy)))/2/n;
+    if (minEig < 0.8 || det < 1e-6){ if (l === 0) return null; gx *= 2; gy *= 2; continue; }
+    for (let it = 0; it < 8; it++){
+      let bx = 0, by = 0; k = 0;
+      for (let dy = -win; dy <= win; dy++) for (let dx = -win; dx <= win; dx++, k++){
+        const e = LK_T[k] - samp(B, px + dx + gx, py + dy + gy); bx += e*LK_X[k]; by += e*LK_Y[k];
+      }
+      const ddx = (gyy*bx - gxy*by)/det, ddy = (-gxy*bx + gxx*by)/det; gx += ddx; gy += ddy;
+      if (ddx*ddx + ddy*ddy < 1e-4) break;
+      if (Math.abs(gx) > 30 || Math.abs(gy) > 30) return null;
+    }
+    if (l > 0){ gx *= 2; gy *= 2; }
+  }
+  const nx = x + gx, ny = y + gy; const L0 = Pc[0];
+  if (nx < 5 || ny < 5 || nx > L0.w - 6 || ny > L0.h - 6) return null;
+  return [nx, ny];
+}
+function shiTomasi(L, x, y){
+  let gxx = 0, gxy = 0, gyy = 0; const d = L.d, w = L.w;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++){
+    const i = (y + dy)*w + x + dx, ix = (d[i + 1] - d[i - 1])*.5, iy = (d[i + w] - d[i - w])*.5;
+    gxx += ix*ix; gxy += ix*iy; gyy += iy*iy;
+  }
+  return ((gxx + gyy) - Math.sqrt(Math.max(0, (gxx - gyy)*(gxx - gyy) + 4*gxy*gxy)))/2;
+}
+// camera pose (in the board frame: x right, y up, z toward the viewer) from the board->image homography
+function cameraFromH(H, f, cx, cy){
+  const col = j => [(H[0][j] - cx*H[2][j])/f, (H[1][j] - cy*H[2][j])/f, H[2][j]];
+  let c1 = col(0), c2 = col(1), t = col(2);
+  const nrm = v => Math.hypot(v[0], v[1], v[2]), lam = 2/(nrm(c1) + nrm(c2));
+  c1 = c1.map(v => v*lam); c2 = c2.map(v => v*lam); t = t.map(v => v*lam);
+  if (t[2] < 0){ c1 = c1.map(v => -v); c2 = c2.map(v => -v); t = t.map(v => -v); }
+  const l1 = nrm(c1); const r1 = c1.map(v => v/l1);
+  const d = r1[0]*c2[0] + r1[1]*c2[1] + r1[2]*c2[2]; let r2 = [c2[0] - d*r1[0], c2[1] - d*r1[1], c2[2] - d*r1[2]]; const l2 = nrm(r2); r2 = r2.map(v => v/l2);
+  const r3 = [r1[1]*r2[2] - r1[2]*r2[1], r1[2]*r2[0] - r1[0]*r2[2], r1[0]*r2[1] - r1[1]*r2[0]];
+  const R = [[r1[0], r2[0], r3[0]], [r1[1], r2[1], r3[1]], [r1[2], r2[2], r3[2]]]; // plane frame -> camera (OpenCV: x right, y down, z forward)
+  const Cm = [-(R[0][0]*t[0] + R[1][0]*t[1] + R[2][0]*t[2]), -(R[0][1]*t[0] + R[1][1]*t[1] + R[2][1]*t[2]), -(R[0][2]*t[0] + R[1][2]*t[1] + R[2][2]*t[2])];
+  const toW = m => [m[0], -m[2], m[1]]; // plane frame (X, Y, Z into table) -> board world (x, y up, z)
+  const pos = toW(Cm), xr = toW(R[0]), yr = toW(R[1]), zr = toW(R[2]);
+  const c0 = xr, c1w = [-yr[0], -yr[1], -yr[2]], c2w = [-zr[0], -zr[1], -zr[2]]; // Three camera axes in world
+  const m = [[c0[0], c1w[0], c2w[0]], [c0[1], c1w[1], c2w[1]], [c0[2], c1w[2], c2w[2]]];
+  return { pos, q: quatFromMat(m), m };
+}
+function quatFromMat(m){
+  const t = m[0][0] + m[1][1] + m[2][2]; let x, y, z, w;
+  if (t > 0){ const s = Math.sqrt(t + 1)*2; w = s/4; x = (m[2][1] - m[1][2])/s; y = (m[0][2] - m[2][0])/s; z = (m[1][0] - m[0][1])/s; }
+  else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]){ const s = Math.sqrt(1 + m[0][0] - m[1][1] - m[2][2])*2; w = (m[2][1] - m[1][2])/s; x = s/4; y = (m[0][1] + m[1][0])/s; z = (m[0][2] + m[2][0])/s; }
+  else if (m[1][1] > m[2][2]){ const s = Math.sqrt(1 + m[1][1] - m[0][0] - m[2][2])*2; w = (m[0][2] - m[2][0])/s; x = (m[0][1] + m[1][0])/s; y = s/4; z = (m[1][2] + m[2][1])/s; }
+  else { const s = Math.sqrt(1 + m[2][2] - m[0][0] - m[1][1])*2; w = (m[1][0] - m[0][1])/s; x = (m[0][2] + m[2][0])/s; y = (m[1][2] + m[2][1])/s; z = s/4; }
+  return [x, y, z, w];
+}
+// the resting open palm gives the table plane: palm layout (metres) <-> palm image points -> board homography (board units = cells)
+function palmBoardH(lm, wl, TW, TH, UNIT){
+  const IDS = [0, 1, 5, 9, 13, 17], P = IDS.map(i => [wl[i].x, wl[i].y, wl[i].z]), c = [0, 0, 0];
+  P.forEach(p => { c[0] += p[0]/6; c[1] += p[1]/6; c[2] += p[2]/6; });
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+  const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]], nr = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0]/l, a[1]/l, a[2]/l]; };
+  const n = nr(cross(sub(P[2], P[0]), sub(P[5], P[0])));
+  let d = sub(P[3], P[0]); const dn = dot(d, n); d = nr([d[0] - dn*n[0], d[1] - dn*n[1], d[2] - dn*n[2]]);
+  const e1 = d, e2 = cross(n, e1), src = [], dst = [];
+  IDS.forEach((id, k) => { const q = sub(P[k], c); src.push([dot(q, e1)/UNIT, dot(q, e2)/UNIT]); dst.push([lm[id].x*TW, lm[id].y*TH]); });
+  let H = fitH(src, dst); if (!H) return null;
+  const jac = M => { const e = 1e-3, p0 = applyH(M, 0, 0), pa = applyH(M, e, 0), pb = applyH(M, 0, e); return [[(pa[0] - p0[0])/e, (pb[0] - p0[0])/e], [(pa[1] - p0[1])/e, (pb[1] - p0[1])/e]]; };
+  let J = jac(H), det = J[0][0]*J[1][1] - J[0][1]*J[1][0];
+  if (det < 0){ H = mul3(H, [[1, 0, 0], [0, -1, 0], [0, 0, 1]]); J = jac(H); det = J[0][0]*J[1][1] - J[0][1]*J[1][0]; }
+  if (Math.abs(det) < 1e-9) return null;
+  let da = -J[0][1]/det, db = J[0][0]/det; const l = Math.hypot(da, db) || 1; da /= l; db /= l;
+  const phi = Math.atan2(-da, db), cs = Math.cos(phi), sn = Math.sin(phi);
+  return mul3(H, [[cs, -sn, 0], [sn, cs, 0], [0, 0, 1]]);
+}
+// tracker: follows the table plane; every tracked point remembers its fixed board coordinates, so errors do not pile up frame after frame
+class PlaneTracker {
+  constructor(TW, TH){ this.TW = TW; this.TH = TH; this.H = null; this.prev = null; this.pts = []; this.lost = 0; this.n = 0; }
+  start(H){ this.H = H; this.prev = null; this.pts = []; this.lost = 0; }
+  step(g, masks){
+    const cur = buildPyr(g, this.TW, this.TH, 3); this.n++;
+    const inMask = (x, y) => masks.some(m => x > m[0] && x < m[2] && y > m[1] && y < m[3]);
+    let status = 'ok';
+    if (this.prev && this.pts.length >= 8){
+      const A = [], B = [], keep = [];
+      for (const p of this.pts){ const q = lkTrack(this.prev, cur, p[0], p[1]); if (q && !inMask(q[0], q[1])){ A.push([p[2], p[3]]); B.push(q); keep.push([q[0], q[1], p[2], p[3]]); } }
+      const r = A.length >= 10 ? ransacH(A, B, 1.3, 90) : null;
+      if (r && r.count >= 10 && r.count >= 0.3*this.pts.length){ this.H = r.H; this.pts = keep.filter((_, i) => r.mask[i]); this.lost = 0; }
+      else { this.lost++; if (this.lost <= 15) return 'lost'; this.pts = []; status = 'reset'; }
+    }
+    if (this.pts.length < 90 && (this.pts.length < 50 || this.n % 4 === 0)) this.seed(cur, masks);
+    this.prev = cur; return status;
+  }
+  seed(cur, masks){
+    const L = cur[0], w = L.w, h = L.h, cell = 12, cols = Math.ceil(w/cell), rows = Math.ceil(h/cell), occ = new Uint8Array(cols*rows);
+    for (const p of this.pts) occ[((p[1]/cell)|0)*cols + ((p[0]/cell)|0)] = 1;
+    const Hi = inv3(this.H); if (!Hi) return;
+    const o = applyH(this.H, 0, 0), sgn = Math.sign(Hi[2][0]*o[0] + Hi[2][1]*o[1] + Hi[2][2]);
+    const best = new Float32Array(cols*rows).fill(-1), bx = new Int16Array(cols*rows), by = new Int16Array(cols*rows), bX = new Float32Array(cols*rows), bY = new Float32Array(cols*rows);
+    for (let y = 6; y < h - 6; y += 3) for (let x = 6; x < w - 6; x += 3){
+      const ci = ((y/cell)|0)*cols + ((x/cell)|0); if (occ[ci]) continue;
+      if (masks.some(m => x > m[0] && x < m[2] && y > m[1] && y < m[3])) continue;
+      const wv = Hi[2][0]*x + Hi[2][1]*y + Hi[2][2]; if (Math.sign(wv) !== sgn) continue;
+      const X = (Hi[0][0]*x + Hi[0][1]*y + Hi[0][2])/wv, Y = (Hi[1][0]*x + Hi[1][1]*y + Hi[1][2])/wv;
+      if (Math.abs(X) > 24 || Math.abs(Y) > 24) continue;
+      const sc = shiTomasi(L, x, y); if (sc > best[ci]){ best[ci] = sc; bx[ci] = x; by[ci] = y; bX[ci] = X; bY[ci] = Y; }
+    }
+    let mx = 0; for (const v of best) if (v > mx) mx = v;
+    const thr = Math.max(40, mx*0.12);
+    for (let i = 0; i < best.length; i++) if (best[i] > thr) this.pts.push([bx[i], by[i], bX[i], bY[i]]);
+  }
+}
+
+// ===== app =====
 const $ = id => document.getElementById(id);
 const video = $('cam'), gl = $('gl'), ov = $('ov'), octx = ov.getContext('2d');
 let W = innerWidth, H = innerHeight, hands = [], sending = false, last = 0;
-let anchored = false, tableY = 0, holdT = 0, holdRef = null, progress = 0;
+let anchored = false, holdT = 0, holdRef = null, progress = 0, acc = null, accN = 0;
 const UNIT = 0.04; // one block = 4 cm on your real table
 const FOCAL = parseFloat(new URLSearchParams(location.search).get('f')) || .78;
-const D2R = Math.PI/180;
+const TW = 160; let TH = 120, tracker = null, tracking = false, trackLost = 0, lastVT = -1, showPtsUntil = 0, lostMsg = false;
 
 const renderer = new THREE.WebGLRenderer({ canvas: gl, alpha: true, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
@@ -81,20 +284,39 @@ function refreshCam(){ // match the 3D camera to the real one so blocks line up 
 }
 addEventListener('resize', resize); resize();
 
-// phone tilt (gyro): which way is down, and where the phone points
-let ori = { a: 0, b: 0, g: 0, ok: false }, absOri = { a: 0, b: 0, g: 0, ok: false }, startedAt = 0, warned = false;
-addEventListener('deviceorientation', e => { if (e.beta == null) return; ori = { a: e.alpha || 0, b: e.beta, g: e.gamma || 0, ok: true }; });
-addEventListener('deviceorientationabsolute', e => { if (e.beta == null) return; absOri = { a: e.alpha || 0, b: e.beta, g: e.gamma || 0, ok: true }; });
-const zee = new THREE.Vector3(0, 0, 1), eul = new THREE.Euler(), q0 = new THREE.Quaternion(), q1 = new THREE.Quaternion(-Math.sqrt(.5), 0, 0, Math.sqrt(.5)), tq = new THREE.Quaternion();
-function updateOrientation(){
-  const o = ori.ok ? ori : absOri;
-  if (o.ok){
-    const orient = ((screen.orientation && screen.orientation.angle) || window.orientation || 0)*D2R;
-    eul.set(o.b*D2R, o.a*D2R, -o.g*D2R, 'YXZ'); tq.setFromEuler(eul);
-    tq.multiply(q1); tq.multiply(q0.setFromAxisAngle(zee, -orient));
-  } else { eul.set(-Math.PI/4, 0, 0); tq.setFromEuler(eul); }
-  camera.quaternion.slerp(tq, .5);
+// ---- table tracking glue ----
+const gcv = document.createElement('canvas'), gctx = gcv.getContext('2d', { willReadFrequently: true });
+function grabGray(){
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480, th = Math.round(TW*vh/vw);
+  if (gcv.width !== TW || gcv.height !== th){ gcv.width = TW; gcv.height = th; }
+  gctx.drawImage(video, 0, 0, TW, th);
+  const d = gctx.getImageData(0, 0, TW, th).data, g = new Float32Array(TW*th);
+  for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = (d[j]*77 + d[j + 1]*150 + d[j + 2]*29)/256;
+  return { g, th };
+}
+function handMasks(){
+  return hands.map(h => {
+    let x0 = 9, y0 = 9, x1 = -9, y1 = -9;
+    h.raw.forEach(l => { x0 = Math.min(x0, l.x); x1 = Math.max(x1, l.x); y0 = Math.min(y0, l.y); y1 = Math.max(y1, l.y); });
+    return [x0*TW - 10, y0*TH - 10, x1*TW + 10, y1*TH + 10];
+  });
+}
+const camT = new THREE.Vector3(), camQ = new THREE.Quaternion();
+function applyCamera(snap){
+  if (!tracker || !tracker.H) return;
+  const c = cameraFromH(tracker.H, FOCAL*TW, TW/2, TH/2);
+  if (!c || c.pos.some(v => !isFinite(v)) || c.q.some(v => !isFinite(v))) return;
+  camT.set(c.pos[0], c.pos[1], c.pos[2]); camQ.set(c.q[0], c.q[1], c.q[2], c.q[3]);
+  if (snap){ camera.position.copy(camT); camera.quaternion.copy(camQ); }
+  else { camera.position.lerp(camT, .75); camera.quaternion.slerp(camQ, .75); }
   camera.updateMatrixWorld(true);
+}
+function trackFrame(){
+  const vt = video.currentTime; if (vt === lastVT || video.readyState < 2) return; lastVT = vt;
+  const st = tracker.step(grabGray().g, handMasks());
+  trackLost = st === 'ok' ? 0 : trackLost + 1;
+  if (trackLost > 25 && !lostMsg){ lostMsg = true; setStatus('Lost the table surface. Hold the phone still over the table, or tap Re-anchor.'); }
+  else if (trackLost === 0 && lostMsg){ lostMsg = false; setStatus(''); }
 }
 
 // ---- pixel-art block textures (Minecraft style) ----
@@ -189,36 +411,39 @@ function updateHands(res){
     return { p, raw: lm, wl: L, rawRatio: d3w(L, lm, 4, 8)/(d3w(L, lm, 0, 9) || .1), ratio: 1, ax: p[8].x, ay: p[8].y };
   });
 }
-
-// ---- anchoring: an open hand resting on the table gives a point on the table (distance comes from palm size) ----
-function palmPoint(h){
-  const lm = h.raw, wl = h.wl, vw = video.videoWidth || 640, vh = video.videoHeight || 480, f = FOCAL*vw;
-  const pairs = [[0,9,.10],[5,17,.075],[0,17,.09]], zs = [];
-  pairs.forEach(([a, b, def]) => {
-    const dpx = Math.hypot((lm[a].x-lm[b].x)*vw, (lm[a].y-lm[b].y)*vh); if (dpx < 5) return;
-    const dm = wl ? Math.hypot(wl[a].x-wl[b].x, wl[a].y-wl[b].y) : def;
-    if (dm > 0.01) zs.push(f*dm/dpx);
-  });
-  if (!zs.length) return null;
-  const Z = zs.reduce((s, v) => s + v, 0)/zs.length/UNIT;
-  const ids = [0,5,9,13,17], cx = ids.reduce((s, k) => s + lm[k].x, 0)/5*vw, cy = ids.reduce((s, k) => s + lm[k].y, 0)/5*vh;
-  return new THREE.Vector3((cx - vw/2)/f*Z, -(cy - vh/2)/f*Z, -Z).applyQuaternion(camera.quaternion);
+function pseudoWL(lm){ // fallback if the hand model gives no 3D data: treat the palm as 10 cm long
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480, s = .10/(Math.hypot((lm[0].x - lm[9].x)*vw, (lm[0].y - lm[9].y)*vh) || 1);
+  return lm.map(l => ({ x: l.x*vw*s, y: l.y*vh*s, z: (l.z || 0)*vw*s }));
 }
-function placeBoard(P){
-  board.position.copy(P); board.rotation.y = Math.atan2(-P.x, -P.z); tableY = P.y;
-  board.visible = true; board.updateMatrixWorld(true); anchored = true; progress = 0;
+
+// ---- anchoring: an open hand resting on the table tells us where the table surface is ----
+function anchorBoard(lm, wl){
+  TH = grabGray().th;
+  const H0 = palmBoardH(lm, wl, TW, TH, UNIT); if (!H0) return false;
+  tracker = new PlaneTracker(TW, TH); tracker.start(H0);
+  board.position.set(0, 0, 0); board.rotation.y = 0; board.visible = true; board.updateMatrixWorld(true);
+  tracking = true; anchored = true; progress = 0; trackLost = 0; lostMsg = false; lastVT = -1; showPtsUntil = performance.now() + 4000;
+  applyCamera(true);
   setStatus('Point with your index finger and pinch to place a block');
+  return true;
 }
 function calibrate(dt){
   if (anchored) return;
-  const h = hands[0];
-  if (!h){ holdT = 0; holdRef = null; progress = 0; return; }
+  const h = hands[0], reset = () => { holdT = 0; holdRef = null; progress = 0; acc = null; accN = 0; };
+  if (!h){ reset(); return; }
   const lm = h.raw, L = h.wl, palm = d3w(L, lm, 0, 9), open = d3w(L, lm, 0, 8) > 1.5*palm && d3w(L, lm, 0, 12) > 1.5*palm;
   const c = { x: h.p[9].x, y: h.p[9].y };
-  if (!open || (holdRef && Math.hypot(c.x-holdRef.x, c.y-holdRef.y) > 22)){ holdRef = c; holdT = 0; progress = 0; return; }
+  if (!open || (holdRef && Math.hypot(c.x - holdRef.x, c.y - holdRef.y) > 22)){ reset(); holdRef = c; return; }
   if (!holdRef) holdRef = c;
-  holdT += dt; progress = Math.min(holdT/1.2, 1);
-  if (holdT >= 1.2){ const P = palmPoint(h); if (P) placeBoard(P); holdT = 0; }
+  const wl = L || pseudoWL(lm);
+  if (!acc) acc = { lm: new Float64Array(42), wl: new Float64Array(63) };
+  for (let i = 0; i < 21; i++){ acc.lm[2*i] += lm[i].x; acc.lm[2*i + 1] += lm[i].y; acc.wl[3*i] += wl[i].x; acc.wl[3*i + 1] += wl[i].y; acc.wl[3*i + 2] += wl[i].z; }
+  accN++; holdT += dt; progress = Math.min(holdT/1.2, 1);
+  if (holdT >= 1.2 && accN >= 3){
+    const m = Array.from({ length: 21 }, (_, i) => ({ x: acc.lm[2*i]/accN, y: acc.lm[2*i + 1]/accN }));
+    const w = Array.from({ length: 21 }, (_, i) => ({ x: acc.wl[3*i]/accN, y: acc.wl[3*i + 1]/accN, z: acc.wl[3*i + 2]/accN }));
+    if (!anchorBoard(m, w)) reset();
+  }
 }
 
 // ---- aiming and pinching: aim is the index fingertip (it barely moves when you pinch) ----
@@ -226,7 +451,7 @@ function act(t, now){
   if (now - lastAct < 250) return; lastAct = now;
   if (mode === 'break'){ if (t.hit) removeBlock(t.hit); }
   else if (t.place){ addBlock(t.place[0], t.place[1], t.place[2], sel, true); lastPlace = t.place; }
-  setStatus('');
+  if (!lostMsg) setStatus('');
 }
 function handLogic(dt, now){
   let shown = null;
@@ -274,8 +499,8 @@ function houseBlueprint(ci, k0, cj){
 }
 $('house').addEventListener('click', () => {
   if (!anchored) return;
-  const t = holds.map(s => s.tgt).find(g => g && g.place), c = t ? t.place : lastPlace;
-  queue.push(...houseBlueprint(c[0], c[1], c[2])); lastPlace = c; setStatus('');
+  const t = holds.map(s => s.tgt).find(g => g && g.place), c = t ? t.place : [0, 0, 0];
+  queue.push(...houseBlueprint(c[0], c[1], c[2])); lastPlace = c; if (!lostMsg) setStatus('');
 });
 
 function animate(dt, now){
@@ -285,8 +510,12 @@ function animate(dt, now){
   }
   if (queue.length && now - lastBuild > 40){ const q = queue.shift(); addBlock(q[0], q[1], q[2], q[3], true); lastBuild = now; }
 }
-function drawHands(){
+function drawHands(now){
   octx.clearRect(0, 0, W, H);
+  if (tracker && (now < showPtsUntil || trackLost > 5)){ // tracked table features, shown briefly so you can see the camera is locked on
+    octx.fillStyle = trackLost > 5 ? 'rgba(255,107,90,.9)' : 'rgba(47,211,192,.9)';
+    tracker.pts.forEach(p => { const q = map({ x: p[0]/TW, y: p[1]/TH }); octx.fillRect(q.x - 2, q.y - 2, 4, 4); });
+  }
   const bones = [[0,1,2,3,4],[0,5,6,7,8],[9,10,11,12],[13,14,15,16],[0,17,18,19,20],[5,9,13,17]];
   hands.forEach((h, i) => {
     const s = holds[i];
@@ -304,23 +533,21 @@ function drawHands(){
 }
 function frame(t){
   const dt = Math.min((t - last)/1000, .05); last = t;
-  updateOrientation(); calibrate(dt);
-  if (startedAt && !warned && !ori.ok && !absOri.ok && t - startedAt > 2500){ warned = true; $('warn').textContent = 'Your phone\u2019s motion sensors are not reaching this page, so blocks stay stuck to the screen. In Chrome tap the lock icon next to the address, open Permissions, allow Motion sensors, then reload. Or use AR mode.'; $('warn').hidden = false; }
-  if (warned && (ori.ok || absOri.ok)) $('warn').hidden = true;
+  calibrate(dt);
+  if (anchored && tracking){ trackFrame(); applyCamera(false); }
   if (anchored){ handLogic(dt, t); animate(dt, t); }
-  renderer.render(scene, camera); drawHands();
+  renderer.render(scene, camera); drawHands(t);
   if (video.readyState >= 2 && !sending && window.handsModel){
     sending = true; handsModel.send({ image: video }).catch(() => {}).finally(() => { sending = false; });
   }
   requestAnimationFrame(frame);
 }
 
-$('recal').addEventListener('click', () => { anchored = false; board.visible = false; ghost.visible = false; holdT = 0; holdRef = null; progress = 0; setStatus('Rest your open hand flat on the table and hold still'); });
+$('recal').addEventListener('click', () => { anchored = false; tracking = false; board.visible = false; ghost.visible = false; holdT = 0; holdRef = null; progress = 0; acc = null; accN = 0; lostMsg = false; setStatus('Rest your open hand flat on the table and hold still'); });
 $('clear').addEventListener('click', () => { blocks.forEach(m => board.remove(m)); blocks.clear(); queue.length = 0; popping.length = 0; count(); });
 $('start').addEventListener('click', async () => {
   const msg = $('msg'); msg.textContent = 'Starting camera\u2026';
   try {
-    if (window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission){ try { await DeviceOrientationEvent.requestPermission(); } catch (e) {} }
     if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
     video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: 640, height: 480 }, audio: false });
     await video.play(); refreshCam();
@@ -331,7 +558,6 @@ $('start').addEventListener('click', async () => {
       msg.textContent = 'Loading hand tracking\u2026';
       await m.initialize(); window.handsModel = m;
     }
-    startedAt = performance.now();
     msg.textContent = ''; $('panel').hidden = true; $('bar').hidden = false; $('hotbar').hidden = false; count();
     setStatus('Rest your open hand flat on the table and hold still');
   } catch (e) {
